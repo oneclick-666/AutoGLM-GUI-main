@@ -131,7 +131,7 @@ def _run_device_shell(device_id: str, command: str, timeout: float = 30) -> Any:
 
     adb_path = os.getenv("AUTOGLM_ADB_PATH", "adb")
     return run_cmd_silently_sync(
-        [adb_path, "-s", device_id, "shell", "sh", "-c", command],
+        [adb_path, "-s", device_id, "shell", command],
         timeout=timeout,
     )
 
