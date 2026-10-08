@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import mimetypes
 import os
+import re
 import secrets
 import shlex
 import tempfile
@@ -136,6 +137,21 @@ def _run_device_shell(device_id: str, command: str, timeout: float = 30) -> Any:
     )
 
 
+def _find_media_entry(
+    device_id: str, collection_uri: str, display_name: str
+) -> tuple[str | None, Any]:
+    where = shlex.quote(f"_display_name='{display_name}'")
+    result = _run_device_shell(
+        device_id,
+        f"content query --uri {collection_uri} "
+        "--projection _id:_display_name:mime_type:relative_path:is_pending "
+        f"--where {where} --sort '_id DESC'",
+        timeout=30,
+    )
+    match = re.search(r"(?:^|[ ,])_id=(\d+)", result.stdout or "")
+    return (match.group(1) if match else None), result
+
+
 @router.get("/api/devices/files/{token}", include_in_schema=False)
 def download_device_upload(token: str) -> FileResponse:
     """Serve a short-lived file URL consumed from inside an Android device."""
@@ -197,10 +213,13 @@ def upload_file_to_device(
             content_type = (mimetypes.guess_type(file.filename or "")[0] or "").lower()
         if content_type.startswith("image/"):
             remote_directory = "/sdcard/Pictures/AutoGLM"
+            media_collection = "content://media/external/images/media"
         elif content_type.startswith("video/"):
             remote_directory = "/sdcard/Movies/AutoGLM"
+            media_collection = "content://media/external/video/media"
         else:
             remote_directory = "/sdcard/Download/AutoGLM"
+            media_collection = "content://media/external/file"
         remote_path = f"{remote_directory}/{stored_name}"
         quoted_directory = shlex.quote(remote_directory)
         quoted_path = shlex.quote(remote_path)
@@ -235,26 +254,64 @@ def upload_file_to_device(
             f"-d {shlex.quote('file://' + remote_path)}",
             timeout=30,
         )
-        media_query = _run_device_shell(
-            device_id,
-            "sleep 1; content query --uri content://media/external/file "
-            "--projection _id:_display_name:_data "
-            f"--where {shlex.quote('_data=' + repr(remote_path))}",
-            timeout=30,
-        )
-        media_scanned = (
-            media_query.returncode == 0
-            and (stored_name in media_query.stdout or remote_path in media_query.stdout)
+        media_id: str | None = None
+        media_query: Any = None
+        for _ in range(3):
+            _run_device_shell(device_id, "sleep 1", timeout=5)
+            media_id, media_query = _find_media_entry(
+                device_id, media_collection, stored_name
+            )
+            if media_id:
+                break
+
+        publish_result: Any = None
+        verification: Any = media_query
+        if media_id and (
+            content_type.startswith("image/") or content_type.startswith("video/")
+        ):
+            media_uri = f"{media_collection}/{media_id}"
+            publish_result = _run_device_shell(
+                device_id,
+                f"content update --uri {media_uri} --bind is_pending:i:0",
+                timeout=30,
+            )
+            verification = _run_device_shell(
+                device_id,
+                f"content query --uri {media_uri} "
+                "--projection _id:_display_name:mime_type:relative_path:is_pending",
+                timeout=30,
+            )
+
+        media_scanned = bool(
+            media_id
+            and verification.returncode == 0
+            and stored_name in (verification.stdout or "")
+            and "is_pending=1" not in (verification.stdout or "")
         )
         if not media_scanned:
             logger.warning(
-                "Media scan not verified for {} on {}: provider={}, broadcast={}, query={}",
+                "Media publication not verified for {} on {}: provider={}, "
+                "broadcast={}, query={}, publish={}, verification={}",
                 remote_path,
                 device_id,
                 (provider_scan.stderr or provider_scan.stdout).strip(),
                 (broadcast_scan.stderr or broadcast_scan.stdout).strip(),
                 (media_query.stderr or media_query.stdout).strip(),
+                (
+                    (publish_result.stderr or publish_result.stdout).strip()
+                    if publish_result
+                    else "not attempted"
+                ),
+                (verification.stderr or verification.stdout).strip(),
             )
+            if content_type.startswith("image/") or content_type.startswith("video/"):
+                raise HTTPException(
+                    status_code=502,
+                    detail=(
+                        "File was copied, but Android MediaStore did not publish it; "
+                        "check the AutoGLM log for MediaProvider output"
+                    ),
+                )
 
         return {
             "success": True,
