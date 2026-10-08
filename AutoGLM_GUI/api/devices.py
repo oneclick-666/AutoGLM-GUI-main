@@ -140,11 +140,16 @@ def _run_device_shell(device_id: str, command: str, timeout: float = 30) -> Any:
 def _find_media_entry(
     device_id: str, collection_uri: str, display_name: str
 ) -> tuple[str | None, Any]:
+    # Some MuMu MediaProvider builds reject a SQL WHERE passed by `content
+    # query`, even when the same expression works on stock Android. Filter the
+    # command output with the device shell instead; uploaded names are generated
+    # by this service and contain only safe characters.
+    name_marker = shlex.quote(f"_display_name={display_name},")
     result = _run_device_shell(
         device_id,
         f"content query --uri {collection_uri} "
         "--projection _id:_display_name:mime_type:relative_path:is_pending "
-        "--sort '_id DESC'",
+        f"--sort '_id DESC' | grep -F -- {name_marker}",
         timeout=30,
     )
     for line in (result.stdout or "").splitlines():
@@ -155,6 +160,29 @@ def _find_media_entry(
         if id_match:
             return id_match.group(1), result
     return None, result
+
+
+def _scan_media_file(device_id: str, remote_path: str) -> Any:
+    quoted_uri = shlex.quote("file://" + remote_path)
+    receiver = _run_device_shell(
+        device_id,
+        "dumpsys package com.android.providers.media.module "
+        "| grep -q MEDIA_SCANNER_SCAN_FILE",
+        timeout=15,
+    )
+    component = (
+        "-n com.android.providers.media.module/"
+        "com.android.providers.media.MediaReceiver "
+        if receiver.returncode == 0
+        else ""
+    )
+    return _run_device_shell(
+        device_id,
+        "am broadcast --user 0 --receiver-foreground "
+        f"{component}-a android.intent.action.MEDIA_SCANNER_SCAN_FILE "
+        f"-d {quoted_uri}",
+        timeout=30,
+    )
 
 
 @router.get("/api/devices/files/{token}", include_in_schema=False)
@@ -252,22 +280,22 @@ def upload_file_to_device(
             f"--method scan_file --arg {quoted_path}",
             timeout=30,
         )
-        broadcast_scan = _run_device_shell(
-            device_id,
-            "am broadcast --user 0 "
-            "-a android.intent.action.MEDIA_SCANNER_SCAN_FILE "
-            f"-d {shlex.quote('file://' + remote_path)}",
-            timeout=30,
-        )
+        broadcast_scan = _scan_media_file(device_id, remote_path)
         media_id: str | None = None
         media_query: Any = None
-        for _ in range(3):
-            _run_device_shell(device_id, "sleep 1", timeout=5)
+        for attempt, delay_seconds in enumerate((1, 2, 3, 5, 8, 13)):
+            _run_device_shell(
+                device_id, f"sleep {delay_seconds}", timeout=delay_seconds + 3
+            )
             media_id, media_query = _find_media_entry(
                 device_id, media_collection, stored_name
             )
             if media_id:
                 break
+            # Slow MuMu instances can drop the first scan request while the
+            # MediaProvider process is starting. Retry once halfway through.
+            if attempt == 2:
+                broadcast_scan = _scan_media_file(device_id, remote_path)
 
         publish_result: Any = None
         verification: Any = media_query
