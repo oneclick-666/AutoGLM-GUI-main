@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
+import mimetypes
+import os
+import secrets
+import shlex
+import tempfile
+import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi.responses import FileResponse
 
 if TYPE_CHECKING:
     from AutoGLM_GUI.device_manager import ManagedDevice
@@ -87,6 +95,142 @@ def _build_device_response_with_agent(
 
 
 router = APIRouter()
+
+_DEVICE_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+_DEVICE_UPLOAD_TTL_SECONDS = 5 * 60
+_DEVICE_UPLOAD_DIR = Path(tempfile.gettempdir()) / "autoglm-device-uploads"
+
+
+def _purge_expired_device_uploads() -> None:
+    now = time.time()
+    if not _DEVICE_UPLOAD_DIR.exists():
+        return
+    for stored_path in _DEVICE_UPLOAD_DIR.iterdir():
+        try:
+            expired = (
+                stored_path.is_file()
+                and now - stored_path.stat().st_mtime > _DEVICE_UPLOAD_TTL_SECONDS
+            )
+            if expired:
+                stored_path.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
+def _safe_file_suffix(filename: str | None, content_type: str | None = None) -> str:
+    suffix = Path(filename or "").suffix.lower()
+    if not suffix and content_type:
+        suffix = mimetypes.guess_extension(content_type.split(";", 1)[0].strip()) or ""
+    if not suffix or len(suffix) > 16 or not suffix[1:].replace("_", "").isalnum():
+        return ""
+    return suffix
+
+
+def _run_device_shell(device_id: str, command: str, timeout: float = 30) -> Any:
+    from AutoGLM_GUI.platform_utils import run_cmd_silently_sync
+
+    adb_path = os.getenv("AUTOGLM_ADB_PATH", "adb")
+    return run_cmd_silently_sync(
+        [adb_path, "-s", device_id, "shell", "sh", "-c", command],
+        timeout=timeout,
+    )
+
+
+@router.get("/api/devices/files/{token}", include_in_schema=False)
+def download_device_upload(token: str) -> FileResponse:
+    """Serve a short-lived file URL consumed from inside an Android device."""
+    _purge_expired_device_uploads()
+    if Path(token).name != token or not token.startswith("upload-"):
+        raise HTTPException(status_code=404, detail="Upload file has expired")
+    stored_path = _DEVICE_UPLOAD_DIR / token
+    if not stored_path.is_file():
+        raise HTTPException(status_code=404, detail="Upload file has expired")
+    try:
+        if time.time() - stored_path.stat().st_mtime > _DEVICE_UPLOAD_TTL_SECONDS:
+            stored_path.unlink(missing_ok=True)
+            raise HTTPException(status_code=404, detail="Upload file has expired")
+    except OSError as error:
+        raise HTTPException(
+            status_code=404, detail="Upload file has expired"
+        ) from error
+    return FileResponse(stored_path, media_type="application/octet-stream")
+
+
+@router.post("/api/devices/files")
+def upload_file_to_device(
+    device_id: str = Form(...),
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    """Let the selected device download a temporary upload into its Download folder."""
+    base_url = os.getenv("AUTOGLM_DEVICE_DOWNLOAD_BASE_URL", "").strip().rstrip("/")
+    if not base_url:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "AUTOGLM_DEVICE_DOWNLOAD_BASE_URL is not configured; set it to an "
+                "AutoGLM address reachable from the Android device"
+            ),
+        )
+
+    _purge_expired_device_uploads()
+    _DEVICE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = _safe_file_suffix(file.filename, file.content_type)
+    stored_name = f"{secrets.token_hex(16)}{suffix}"
+    token = f"upload-{secrets.token_urlsafe(32)}{suffix}"
+    stored_path = _DEVICE_UPLOAD_DIR / token
+    size = 0
+    try:
+        with stored_path.open("wb") as output:
+            while chunk := file.file.read(1024 * 1024):
+                size += len(chunk)
+                if size > _DEVICE_UPLOAD_MAX_BYTES:
+                    raise HTTPException(
+                        status_code=413, detail="File exceeds the 50 MB limit"
+                    )
+                output.write(chunk)
+        if size == 0:
+            raise HTTPException(status_code=400, detail="File is empty")
+
+        download_url = f"{base_url}/api/devices/files/{token}"
+        remote_path = f"/sdcard/Download/{stored_name}"
+        quoted_path = shlex.quote(remote_path)
+        quoted_url = shlex.quote(download_url)
+        command = (
+            "mkdir -p /sdcard/Download && "
+            "curl -fL --connect-timeout 15 --max-time 180 "
+            f"-o {quoted_path} {quoted_url} && "
+            f"chmod 0644 {quoted_path} && sync"
+        )
+        result = _run_device_shell(device_id, command, timeout=210)
+        if result.returncode != 0:
+            error = (result.stderr or result.stdout or "device download failed").strip()
+            raise HTTPException(
+                status_code=502,
+                detail=f"Device failed to download file: {error[-1000:]}",
+            )
+
+        scan_command = (
+            "am broadcast --user 0 -a android.intent.action.MEDIA_SCANNER_SCAN_FILE "
+            f"-d {shlex.quote('file://' + remote_path)}"
+        )
+        scan_result = _run_device_shell(device_id, scan_command, timeout=30)
+        if scan_result.returncode != 0:
+            logger.warning(
+                "Media scan failed for {} on {}: {}",
+                remote_path,
+                device_id,
+                (scan_result.stderr or scan_result.stdout).strip(),
+            )
+
+        return {
+            "success": True,
+            "filename": stored_name,
+            "path": remote_path,
+            "size": size,
+            "media_scanned": scan_result.returncode == 0,
+        }
+    finally:
+        stored_path.unlink(missing_ok=True)
 
 
 @router.get("/api/devices", response_model=DeviceListResponse)

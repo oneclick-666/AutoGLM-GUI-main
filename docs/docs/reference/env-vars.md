@@ -39,6 +39,7 @@ sidebar_position: 2
 | --- | --- | --- |
 | `AUTOGLM_CORS_ORIGINS` | `http://localhost:3000` | 允许的 CORS 来源 |
 | `AUTOGLM_STREAM_SECRET` | 未设置 | 视频流短期凭证签名密钥；接入 SMM 时须与 SMM 配置一致，建议至少 32 个随机字符；设置后 AutoGLM 自带网页的旧版直连播放器将无法连接 |
+| `AUTOGLM_DEVICE_DOWNLOAD_BASE_URL` | 未设置 | 文件上传时供手机/模拟器内 `curl` 访问的 AutoGLM 地址，例如 `http://192.168.31.10:8000`；不能使用设备无法访问的 `127.0.0.1` |
 | `AUTOGLM_ENABLE_WEB_TERMINAL` | `0` | 置为 `1` 启用 [Web 终端](../guide/web-terminal.md) |
 | `AUTOGLM_SERVER_HOST` | `127.0.0.1` | 服务绑定的主机地址，Web 终端等内部模块使用 |
 | `AUTOGLM_ADB_PATH` | `adb` | adb 可执行文件路径 |
