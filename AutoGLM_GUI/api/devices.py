@@ -192,11 +192,21 @@ def upload_file_to_device(
             raise HTTPException(status_code=400, detail="File is empty")
 
         download_url = f"{base_url}/api/devices/files/{token}"
-        remote_path = f"/sdcard/Download/{stored_name}"
+        content_type = (file.content_type or "").lower()
+        if not content_type or content_type == "application/octet-stream":
+            content_type = (mimetypes.guess_type(file.filename or "")[0] or "").lower()
+        if content_type.startswith("image/"):
+            remote_directory = "/sdcard/Pictures/AutoGLM"
+        elif content_type.startswith("video/"):
+            remote_directory = "/sdcard/Movies/AutoGLM"
+        else:
+            remote_directory = "/sdcard/Download/AutoGLM"
+        remote_path = f"{remote_directory}/{stored_name}"
+        quoted_directory = shlex.quote(remote_directory)
         quoted_path = shlex.quote(remote_path)
         quoted_url = shlex.quote(download_url)
         command = (
-            "mkdir -p /sdcard/Download && "
+            f"mkdir -p {quoted_directory} && "
             "curl -fL --connect-timeout 15 --max-time 180 "
             f"-o {quoted_path} {quoted_url} && "
             f"chmod 0644 {quoted_path} && sync"
@@ -209,17 +219,41 @@ def upload_file_to_device(
                 detail=f"Device failed to download file: {error[-1000:]}",
             )
 
-        scan_command = (
-            "am broadcast --user 0 -a android.intent.action.MEDIA_SCANNER_SCAN_FILE "
-            f"-d {shlex.quote('file://' + remote_path)}"
+        # On newer Android/MuMu builds the MEDIA_SCANNER_SCAN_FILE broadcast can
+        # return success while MediaProvider ignores it. Calling MediaProvider's
+        # scan_file method first ensures image/video rows are actually inserted.
+        provider_scan = _run_device_shell(
+            device_id,
+            "content call --uri content://media "
+            f"--method scan_file --arg {quoted_path}",
+            timeout=30,
         )
-        scan_result = _run_device_shell(device_id, scan_command, timeout=30)
-        if scan_result.returncode != 0:
+        broadcast_scan = _run_device_shell(
+            device_id,
+            "am broadcast --user 0 "
+            "-a android.intent.action.MEDIA_SCANNER_SCAN_FILE "
+            f"-d {shlex.quote('file://' + remote_path)}",
+            timeout=30,
+        )
+        media_query = _run_device_shell(
+            device_id,
+            "sleep 1; content query --uri content://media/external/file "
+            "--projection _id:_display_name:_data "
+            f"--where {shlex.quote('_data=' + repr(remote_path))}",
+            timeout=30,
+        )
+        media_scanned = (
+            media_query.returncode == 0
+            and (stored_name in media_query.stdout or remote_path in media_query.stdout)
+        )
+        if not media_scanned:
             logger.warning(
-                "Media scan failed for {} on {}: {}",
+                "Media scan not verified for {} on {}: provider={}, broadcast={}, query={}",
                 remote_path,
                 device_id,
-                (scan_result.stderr or scan_result.stdout).strip(),
+                (provider_scan.stderr or provider_scan.stdout).strip(),
+                (broadcast_scan.stderr or broadcast_scan.stdout).strip(),
+                (media_query.stderr or media_query.stdout).strip(),
             )
 
         return {
@@ -227,7 +261,7 @@ def upload_file_to_device(
             "filename": stored_name,
             "path": remote_path,
             "size": size,
-            "media_scanned": scan_result.returncode == 0,
+            "media_scanned": media_scanned,
         }
     finally:
         stored_path.unlink(missing_ok=True)
