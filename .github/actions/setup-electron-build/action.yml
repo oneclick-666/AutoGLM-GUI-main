@@ -1,0 +1,113 @@
+name: Setup Electron Build Environment
+description: Setup Python, uv, Node.js, pnpm with caching for Electron builds
+
+inputs:
+  python-version:
+    description: Python version to use
+    required: false
+    default: "3.11"
+  node-version:
+    description: Node.js version to use
+    required: false
+    default: "22"
+  pnpm-version:
+    description: pnpm version to use
+    required: false
+    default: "10"
+  cache-suffix:
+    description: Optional suffix for cache keys (e.g., "x64" for architecture-specific caches)
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    # Python setup
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    # uv installation (pinned GitHub Action, avoids piping remote scripts)
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+      with:
+        enable-cache: true
+        cache-dependency-glob: "uv.lock"
+
+    # pnpm setup
+    - name: Setup pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        version: ${{ inputs.pnpm-version }}
+
+    # Node.js setup
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: "pnpm"
+        cache-dependency-path: |
+          frontend/pnpm-lock.yaml
+          electron/pnpm-lock.yaml
+
+    # Verify pnpm installation - Unix
+    - name: Verify pnpm (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        pnpm --version
+        which pnpm
+
+    # Verify pnpm installation - Windows
+    - name: Verify pnpm (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        pnpm --version
+        echo "pnpm is installed at: $(Get-Command pnpm | Select-Object -ExpandProperty Source)"
+
+    # pnpm cache - Unix
+    - name: Get pnpm store directory (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        echo "STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_ENV
+
+    # pnpm cache - Windows
+    - name: Get pnpm store directory (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        echo "STORE_PATH=$(pnpm store path --silent)" >> $env:GITHUB_ENV
+
+    - name: Cache pnpm store
+      uses: actions/cache@v4
+      with:
+        path: ${{ env.STORE_PATH }}
+        key: ${{ runner.os }}${{ inputs.cache-suffix && format('-{0}', inputs.cache-suffix) || '' }}-pnpm-store-${{ hashFiles('**/pnpm-lock.yaml') }}
+        restore-keys: |
+          ${{ runner.os }}${{ inputs.cache-suffix && format('-{0}', inputs.cache-suffix) || '' }}-pnpm-store-
+
+    # Install frontend dependencies
+    - name: Install frontend dependencies
+      shell: bash
+      run: |
+        cd frontend
+        pnpm install --frozen-lockfile
+
+    # Install electron dependencies
+    - name: Install electron dependencies
+      shell: bash
+      run: |
+        cd electron
+        pnpm install --frozen-lockfile
+
+    # uv cache
+    - name: Cache uv
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/uv
+        key: ${{ runner.os }}${{ inputs.cache-suffix && format('-{0}', inputs.cache-suffix) || '' }}-uv-${{ hashFiles('**/uv.lock') }}
+        restore-keys: |
+          ${{ runner.os }}${{ inputs.cache-suffix && format('-{0}', inputs.cache-suffix) || '' }}-uv-

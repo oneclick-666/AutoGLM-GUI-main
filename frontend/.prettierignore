@@ -1,0 +1,22 @@
+# Dependencies
+node_modules
+pnpm-lock.yaml
+
+# Build outputs
+dist
+build
+.vite
+
+# Auto-generated files
+src/routeTree.gen.ts
+
+# Coverage
+coverage
+
+# Cache
+.eslintcache
+.tsbuildinfo
+
+# Playwright
+test-results/
+playwright-report/

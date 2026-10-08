@@ -1,0 +1,451 @@
+"""AsyncGeminiAgent - 通用视觉模型 Agent，使用 OpenAI 兼容的 function calling。
+
+支持 Gemini、GPT-4o、Claude 等任何支持 vision + tool use 的模型，
+通过 OpenAI 兼容 API 端点接入。
+"""
+
+import asyncio
+import json
+import traceback
+from collections.abc import AsyncGenerator
+from typing import Any
+
+from AutoGLM_GUI.actions import ActionResult
+from AutoGLM_GUI.agents.base import AsyncAgentBase
+from AutoGLM_GUI.logger import logger
+from AutoGLM_GUI.model import MessageBuilder
+from AutoGLM_GUI.model.error_details import (
+    model_error_message,
+    serialize_model_error_async,
+    trace_error_attrs,
+)
+from AutoGLM_GUI.trace import summarize_text, trace_span
+
+from .action_mapper import InvalidToolCallError, tool_call_to_action
+from .prompts import get_system_prompt
+from .tools import DEVICE_TOOLS
+
+
+class AsyncGeminiAgent(AsyncAgentBase):
+    """通用视觉模型 Agent，使用 function calling 而非自定义格式解析。"""
+
+    max_consecutive_invalid_tool_calls = 3
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self._consecutive_invalid_tool_calls = 0
+
+    def reset(self) -> None:
+        super().reset()
+        self._consecutive_invalid_tool_calls = 0
+
+    def _get_default_system_prompt(self, lang: str) -> str:
+        return get_system_prompt(lang)
+
+    def _prepare_initial_context(
+        self,
+        task: str,
+        screenshot_base64: str,
+        current_app: str,
+        reference_images: list[dict[str, str]] | None = None,
+    ) -> None:
+        reference_images = reference_images or []
+        reference_notice = MessageBuilder.build_user_reference_images_notice(
+            len(reference_images)
+        )
+        reference_section = (
+            f"\n\nUser reference images: {reference_notice}" if reference_notice else ""
+        )
+        self._consecutive_invalid_tool_calls = 0
+        self._context.append(
+            MessageBuilder.create_user_message_with_images(
+                text=f"{task}{reference_section}\n\nCurrent app: {current_app}",
+                images=[
+                    {"mime_type": "image/png", "data": screenshot_base64},
+                    *reference_images,
+                ],
+            )
+        )
+
+    async def _execute_step(self) -> AsyncGenerator[dict[str, Any], None]:
+        """执行单步：调用 LLM → 解析 tool call → 执行动作。"""
+        self._step_count += 1
+        screenshot = None
+
+        # 1. 获取截图（非首步）
+        if self._step_count > 1:
+            try:
+                with trace_span(
+                    "step.capture_screenshot",
+                    attrs={
+                        "step": self._step_count,
+                        "agent_type": self.__class__.__name__,
+                    },
+                ):
+                    screenshot = await self.device.get_screenshot()
+                with trace_span(
+                    "step.get_current_app",
+                    attrs={
+                        "step": self._step_count,
+                        "agent_type": self.__class__.__name__,
+                    },
+                ):
+                    current_app = await self.device.get_current_app()
+            except Exception as e:
+                logger.error(f"Failed to get device info: {e}")
+                yield {"type": "error", "data": {"message": f"Device error: {e}"}}
+                yield {
+                    "type": "step",
+                    "data": {
+                        "step": self._step_count,
+                        "thinking": "",
+                        "action": None,
+                        "success": False,
+                        "finished": True,
+                        "message": f"Device error: {e}",
+                    },
+                }
+                return
+
+            with trace_span(
+                "step.build_message",
+                attrs={"step": self._step_count, "agent_type": self.__class__.__name__},
+            ):
+                self._context.append(
+                    MessageBuilder.create_user_message(
+                        text=f"Current app: {current_app}",
+                        image_base64=screenshot.base64_data,
+                    )
+                )
+
+        # 2. 调用 LLM with tools
+        try:
+            with trace_span(
+                "step.llm",
+                attrs={
+                    "step": self._step_count,
+                    "agent_type": self.__class__.__name__,
+                    "model_name": self.model_config.model_name,
+                    "message_count": len(self._context),
+                },
+            ) as span:
+                try:
+                    (
+                        thinking,
+                        reasoning_content,
+                        tool_name,
+                        tool_args,
+                    ) = await self._call_llm_with_tools()
+                    span.set_attributes(
+                        {
+                            "thinking_chars": len(thinking),
+                            "reasoning_content_present": bool(reasoning_content),
+                        }
+                    )
+                except Exception as exc:
+                    error_details = await serialize_model_error_async(
+                        exc,
+                        model_config=self.model_config,
+                        call_site="AutoGLM_GUI.agents.gemini.async_agent.AsyncGeminiAgent._call_llm_with_tools",
+                    )
+                    span.set_attributes(trace_error_attrs(error_details))
+                    raise
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"LLM error: {e}")
+            if self.agent_config.verbose:
+                logger.debug(traceback.format_exc())
+            error_details = await serialize_model_error_async(
+                e,
+                model_config=self.model_config,
+                call_site="AutoGLM_GUI.agents.gemini.async_agent.AsyncGeminiAgent._call_llm_with_tools",
+            )
+            message = model_error_message(e)
+            yield {
+                "type": "error",
+                "data": {"message": message, "error_details": error_details},
+            }
+            yield {
+                "type": "step",
+                "data": {
+                    "step": self._step_count,
+                    "thinking": "",
+                    "action": None,
+                    "success": False,
+                    "finished": True,
+                    "message": message,
+                    "error_details": error_details,
+                },
+            }
+            return
+
+        if thinking:
+            yield {"type": "thinking", "data": {"chunk": thinking}}
+
+        # 3. 转换 tool call → action
+        with trace_span(
+            "step.parse_action",
+            attrs={"step": self._step_count, "agent_type": self.__class__.__name__},
+        ):
+            with trace_span(
+                "tool.call",
+                attrs={
+                    "step": self._step_count,
+                    "caller": "gemini_model",
+                    "tool_name": tool_name,
+                    "tool_arg_keys": sorted(tool_args.keys()),
+                    "tool_args_preview": summarize_text(
+                        json.dumps(tool_args, ensure_ascii=False, default=str),
+                        limit=512,
+                    ),
+                },
+            ) as span:
+                try:
+                    action = tool_call_to_action(tool_name, tool_args)
+                except InvalidToolCallError as exc:
+                    self._consecutive_invalid_tool_calls += 1
+                    error_message = self._invalid_tool_call_message(exc)
+                    logger.warning(
+                        f"Invalid Gemini tool call on step {self._step_count} "
+                        f"({tool_name}): {error_message}"
+                    )
+                    span.set_attributes(
+                        {
+                            "success": False,
+                            "error_kind": "invalid_arguments",
+                            "error_message": error_message,
+                            "invalid_count": self._consecutive_invalid_tool_calls,
+                        }
+                    )
+                    action = {
+                        "_metadata": "tool_error",
+                        "tool_name": tool_name,
+                        "arguments": tool_args,
+                        "message": error_message,
+                    }
+                else:
+                    self._consecutive_invalid_tool_calls = 0
+                    span.set_attributes(
+                        {"success": True, "action_name": action.get("action")}
+                    )
+
+        if self.agent_config.verbose:
+            logger.debug(f"🎯 Tool call: {tool_name}({tool_args})")
+            logger.debug(f"   Action: {json.dumps(action, ensure_ascii=False)}")
+
+        if action.get("_metadata") == "tool_error":
+            limit_reached = (
+                self._consecutive_invalid_tool_calls
+                >= self.max_consecutive_invalid_tool_calls
+            )
+            error_message = str(action.get("message", "Invalid tool call"))
+            tool_result = {
+                "success": False,
+                "error_code": "invalid_tool_arguments",
+                "message": error_message,
+                "retryable": not limit_reached,
+            }
+            with trace_span(
+                "step.update_context",
+                attrs={"step": self._step_count, "agent_type": self.__class__.__name__},
+            ):
+                self._remove_latest_message_images()
+                self._append_tool_exchange(
+                    thinking=thinking,
+                    reasoning_content=reasoning_content,
+                    tool_name=tool_name,
+                    tool_args=tool_args,
+                    tool_result=tool_result,
+                )
+
+            message = error_message
+            if limit_reached:
+                message = (
+                    "Tool call validation failed "
+                    f"{self._consecutive_invalid_tool_calls} consecutive times: "
+                    f"{error_message}"
+                )
+
+            yield {
+                "type": "step",
+                "data": {
+                    "step": self._step_count,
+                    "thinking": thinking,
+                    "action": action,
+                    "success": False,
+                    "finished": limit_reached,
+                    "message": message,
+                    "screenshot": screenshot.base64_data if screenshot else None,
+                },
+            }
+            return
+
+        # 4. 执行 action
+        try:
+            with trace_span(
+                "step.capture_screenshot",
+                attrs={
+                    "step": self._step_count,
+                    "agent_type": self.__class__.__name__,
+                    "purpose": "pre_action",
+                },
+            ):
+                screenshot = await self.device.get_screenshot()
+            with trace_span(
+                "step.execute_action",
+                attrs={
+                    "step": self._step_count,
+                    "agent_type": self.__class__.__name__,
+                    "action_name": action.get("action"),
+                    "action_type": action.get("_metadata"),
+                },
+            ):
+                result = await self.action_handler.execute(
+                    action,
+                    screenshot.width,
+                    screenshot.height,
+                )
+        except Exception as e:
+            logger.error(f"Action execution error: {e}")
+            result = ActionResult(success=False, should_finish=True, message=str(e))
+
+        # 5. 更新上下文
+        with trace_span(
+            "step.update_context",
+            attrs={"step": self._step_count, "agent_type": self.__class__.__name__},
+        ):
+            self._remove_latest_message_images()
+            self._append_tool_exchange(
+                thinking=thinking,
+                reasoning_content=reasoning_content,
+                tool_name=tool_name,
+                tool_args=tool_args,
+                tool_result={
+                    "success": result.success,
+                    "message": result.message or "OK",
+                },
+            )
+
+        # 6. 检查完成
+        finished = action.get("_metadata") == "finish" or result.should_finish
+
+        yield {
+            "type": "step",
+            "data": {
+                "step": self._step_count,
+                "thinking": thinking,
+                "action": action,
+                "success": result.success,
+                "finished": finished,
+                "message": result.message or action.get("message"),
+                "screenshot": screenshot.base64_data if screenshot else None,
+            },
+        }
+
+    async def _call_llm_with_tools(
+        self,
+    ) -> tuple[str, str | None, str, dict[str, Any]]:
+        """调用 LLM，返回 (thinking, reasoning_content, tool_name, tool_args)。"""
+        if self._cancel_event.is_set():
+            raise asyncio.CancelledError()
+
+        response = await self.openai_client.chat.completions.create(
+            messages=self._context,  # type: ignore[arg-type]
+            model=self.model_config.model_name,
+            max_tokens=self.model_config.max_tokens,
+            temperature=self.model_config.temperature,
+            tools=DEVICE_TOOLS,  # type: ignore[arg-type]
+            tool_choice="required",
+        )
+
+        choice = response.choices[0]
+        message = choice.message
+
+        thinking, reasoning_content = self._extract_thinking(message)
+
+        if message.tool_calls and len(message.tool_calls) > 0:
+            tool_call = message.tool_calls[0]
+            tool_name = tool_call.function.name  # type: ignore[union-attr]
+            try:
+                parsed_args = json.loads(tool_call.function.arguments)  # type: ignore[union-attr]
+                tool_args = parsed_args if isinstance(parsed_args, dict) else {}
+            except json.JSONDecodeError as e:
+                logger.warning(
+                    f"Failed to parse tool arguments for {tool_name}: {e}. "
+                    f"Raw: {tool_call.function.arguments!r}"  # type: ignore[union-attr]
+                )
+                tool_args = {}
+            return thinking, reasoning_content, tool_name, tool_args
+
+        logger.warning("Model did not return a tool call, treating as finish")
+        return (
+            thinking,
+            reasoning_content,
+            "finish",
+            {"message": thinking or "No action returned"},
+        )
+
+    def _remove_latest_message_images(self) -> None:
+        if len(self._context) > 1:
+            self._context[-1] = MessageBuilder.remove_images_from_message(
+                self._context[-1]
+            )
+
+    def _append_tool_exchange(
+        self,
+        *,
+        thinking: str,
+        reasoning_content: str | None,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        tool_result: dict[str, Any],
+    ) -> None:
+        tool_call_id = f"call_{self._step_count}"
+        assistant_message = {
+            "role": "assistant",
+            "content": thinking or "",
+            "tool_calls": [
+                {
+                    "id": tool_call_id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_name,
+                        "arguments": json.dumps(tool_args, ensure_ascii=False),
+                    },
+                }
+            ],
+        }
+        if reasoning_content:
+            assistant_message["reasoning_content"] = reasoning_content
+        self._context.append(assistant_message)
+        self._context.append(
+            {
+                "role": "tool",
+                "tool_call_id": tool_call_id,
+                "content": json.dumps(tool_result, ensure_ascii=False),
+            }
+        )
+
+    @staticmethod
+    def _invalid_tool_call_message(exc: InvalidToolCallError) -> str:
+        return (
+            f"Invalid tool call for {exc.tool_name}: {exc.message}. "
+            "Return arguments that match the declared tool schema."
+        )
+
+    @classmethod
+    def _extract_thinking(cls, message: Any) -> tuple[str, str | None]:
+        content = cls._message_text_field(message, "content")
+        reasoning_content = cls._message_text_field(
+            message, "reasoning_content"
+        ) or cls._message_text_field(message, "reasoning")
+        return content or reasoning_content, reasoning_content or None
+
+    @staticmethod
+    def _message_text_field(message: Any, field_name: str) -> str:
+        if isinstance(message, dict):
+            value = message.get(field_name)
+        else:
+            value = getattr(message, field_name, None)
+        return value if isinstance(value, str) else ""

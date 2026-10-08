@@ -1,0 +1,74 @@
+name: Web E2E Tests
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-web-e2e:
+    name: Windows Web E2E
+    runs-on: windows-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python & uv
+        uses: ./.github/actions/setup-python
+
+      - name: Setup Node.js & pnpm
+        uses: ./.github/actions/setup-node
+        with:
+          node-version: "24"
+
+      - name: Install Playwright Chromium
+        shell: bash
+        run: |
+          cd frontend
+          pnpm exec playwright install chromium
+
+      - name: Run frontend E2E tests
+        shell: bash
+        run: |
+          cd frontend
+          pnpm test:e2e
+
+      - name: Package Playwright report (videos + traces + screenshots)
+        if: always()
+        shell: bash
+        run: |
+          cd frontend
+          # Bundle the HTML report (with embedded videos/traces) into a single
+          # zip so it can be downloaded from the Actions run for debugging.
+          if [ -d playwright-report ]; then
+            7z a playwright-report.zip ./playwright-report
+          fi
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-windows
+          path: frontend/playwright-report.zip
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Generate test summary
+        if: always()
+        shell: bash
+        run: |
+          echo "## Web E2E Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ job.status }}" = "success" ]; then
+            echo "✅ Web E2E tests passed." >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Web E2E tests failed. Check the logs above." >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📥 Download the **playwright-report-windows** artifact for the recorded videos, traces, and screenshots." >> $GITHUB_STEP_SUMMARY

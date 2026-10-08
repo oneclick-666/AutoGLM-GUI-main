@@ -1,0 +1,185 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - v*
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python & uv
+        uses: ./.github/actions/setup-python
+
+      - name: Setup Node.js & pnpm
+        uses: ./.github/actions/setup-node
+        with:
+          pnpm-version: "10"
+
+      - name: Get Version
+        id: version
+        run: |
+          echo "VERSION=$(uvx --from=toml-cli toml get --toml-path=pyproject.toml project.version)" >> $GITHUB_OUTPUT
+          echo "TAG_VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Check Version
+        if: steps.version.outputs.VERSION != steps.version.outputs.TAG_VERSION
+        run: |
+          echo "Version mismatch: ${{ steps.version.outputs.VERSION }} != ${{ steps.version.outputs.TAG_VERSION }}"
+          exit 1
+
+      - name: Build Frontend
+        env:
+          VITE_BACKEND_VERSION: ${{ steps.version.outputs.VERSION }}
+        run: |
+          cd frontend
+          pnpm install
+          pnpm build
+
+      - name: Copy Static Files
+        run: |
+          mkdir -p AutoGLM_GUI/static
+          cp -r frontend/dist/* AutoGLM_GUI/static/
+
+      - name: Build Package
+        run: uv build
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+      - name: Create Release if not exists
+        run: |
+          gh release view ${{ steps.version.outputs.TAG_NAME }} || \
+          gh release create ${{ steps.version.outputs.TAG_NAME }} --title "${{ steps.version.outputs.TAG_NAME }}" --notes "Release ${{ steps.version.outputs.TAG_NAME }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Release Asset
+        run: gh release upload --clobber ${{ steps.version.outputs.TAG_NAME }} dist/*.tar.gz dist/*.whl
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-docker:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: release
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get version from tag
+        id: version
+        run: |
+          echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+      - name: Generate summary
+        run: |
+          echo "## Docker Image Published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${{ steps.version.outputs.VERSION }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Tags:**" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "${{ steps.meta.outputs.tags }}" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # Electron builds using reusable workflow
+  build-electron-macos:
+    name: Build Electron (macOS ARM64)
+    needs: release
+    uses: ./.github/workflows/_electron-build.yml
+    permissions:
+      contents: write
+    with:
+      platform: macos-arm64
+      publish_mode: onTag
+    secrets:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-electron-macos-x64:
+    name: Build Electron (macOS x64)
+    needs: release
+    uses: ./.github/workflows/_electron-build.yml
+    permissions:
+      contents: write
+    with:
+      platform: macos-x64
+      publish_mode: onTag
+    secrets:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-electron-windows:
+    name: Build Electron (Windows x64)
+    needs: release
+    uses: ./.github/workflows/_electron-build.yml
+    permissions:
+      contents: write
+    with:
+      platform: windows
+      publish_mode: onTag
+      node_version: "24"
+    secrets:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  build-electron-linux:
+    name: Build Electron (Linux x64)
+    needs: release
+    uses: ./.github/workflows/_electron-build.yml
+    permissions:
+      contents: write
+    with:
+      platform: linux
+      publish_mode: onTag
+    secrets:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

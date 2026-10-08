@@ -1,0 +1,217 @@
+# Reusable workflow for Electron builds
+# Used by both build.yml (CI) and release.yml (Release)
+name: Electron Build
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        description: 'Target platform: windows, macos-arm64, macos-x64, linux'
+        required: true
+        type: string
+      publish_mode:
+        description: 'Publish mode: never (CI), onTag (release), always'
+        required: false
+        type: string
+        default: 'never'
+      upload_artifacts:
+        description: 'Upload build artifacts to GitHub Actions'
+        required: false
+        type: boolean
+        default: false
+      artifact_retention_days:
+        description: 'Retention days for uploaded artifacts'
+        required: false
+        type: number
+        default: 7
+      node_version:
+        description: 'Node.js version'
+        required: false
+        type: string
+        default: '22'
+    secrets:
+      GH_TOKEN:
+        description: 'GitHub token for publishing (required when publish_mode != never)'
+        required: false
+
+jobs:
+  build:
+    name: Build for ${{ inputs.platform }}
+    runs-on: ${{ inputs.platform == 'windows' && 'windows-latest' || inputs.platform == 'macos-arm64' && 'macos-latest' || inputs.platform == 'macos-x64' && 'macos-15-intel' || inputs.platform == 'linux' && 'ubuntu-22.04' || 'ubuntu-latest' }}
+
+    env:
+      PYTHONIOENCODING: ${{ inputs.platform == 'windows' && 'utf-8' || '' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # macOS: Disable Spotlight and clean mounted images
+      - name: macOS cleanup
+        if: startsWith(inputs.platform, 'macos')
+        run: |
+          # Disable Spotlight indexing to prevent mds interference
+          sudo mdutil -a -i off || true
+          # Kill any mds processes that might be accessing disk images
+          sudo pkill -9 mds || true
+          sudo pkill -9 mds_stores || true
+          # Unmount all mounted disk images (release builds)
+          hdiutil info | awk '/\/dev\/disk[0-9]+/ {print $1}' | xargs -n1 -I{} hdiutil detach -force -quiet {} || true
+          # Give the system time to clean up resources
+          sleep 2
+
+      - name: Setup Electron build environment
+        uses: ./.github/actions/setup-electron-build
+        with:
+          node-version: ${{ inputs.node_version }}
+          cache-suffix: ${{ inputs.platform == 'macos-x64' && 'x64' || '' }}
+
+      # Build with CI=false when not publishing (prevents implicit publish)
+      - name: Build application (CI mode)
+        if: inputs.publish_mode == 'never'
+        env:
+          CI: "false"
+        run: uv run python scripts/build_electron.py --publish never
+
+      # Build with GH_TOKEN when publishing
+      - name: Build and publish application
+        if: inputs.publish_mode != 'never'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: uv run python scripts/build_electron.py --publish ${{ inputs.publish_mode }}
+
+      - name: List dist directory
+        shell: bash
+        run: |
+          if [ -d "electron/dist" ]; then
+            ls -lh electron/dist/
+          else
+            echo "No dist directory found"
+          fi
+
+      # Artifact upload (CI builds only)
+      - name: Get artifact paths (Windows)
+        if: inputs.upload_artifacts && inputs.platform == 'windows'
+        id: artifacts-windows
+        shell: pwsh
+        run: |
+          # Find portable exe (not containing "Setup")
+          $portableExe = Get-ChildItem -Path electron\dist -Filter *.exe -File | Where-Object { $_.Name -notmatch "Setup" } | Select-Object -First 1
+          if ($portableExe) {
+            echo "portable_name=$($portableExe.Name -replace '\s', '-')" >> $env:GITHUB_OUTPUT
+            echo "portable_path=$($portableExe.FullName)" >> $env:GITHUB_OUTPUT
+          }
+          # Find setup exe
+          $setupExe = Get-ChildItem -Path electron\dist -Filter *.exe -File | Where-Object { $_.Name -match "Setup" } | Select-Object -First 1
+          if ($setupExe) {
+            echo "setup_name=$($setupExe.Name -replace '\s', '-')" >> $env:GITHUB_OUTPUT
+            echo "setup_path=$($setupExe.FullName)" >> $env:GITHUB_OUTPUT
+          }
+          # Find blockmap
+          $blockmap = Get-ChildItem -Path electron\dist -Filter *.exe.blockmap -File | Select-Object -First 1
+          if ($blockmap) {
+            echo "blockmap_name=$($blockmap.Name -replace '\s', '-')" >> $env:GITHUB_OUTPUT
+            echo "blockmap_path=$($blockmap.FullName)" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Get artifact paths (macOS)
+        if: inputs.upload_artifacts && startsWith(inputs.platform, 'macos')
+        id: artifacts-macos
+        run: |
+          dmg_file=$(find electron/dist -type f -name "*.dmg" ! -name "*.blockmap" | head -n 1)
+          if [ -n "$dmg_file" ]; then
+            echo "dmg_name=$(basename "$dmg_file" | tr ' ' '-')" >> $GITHUB_OUTPUT
+            echo "dmg_path=$dmg_file" >> $GITHUB_OUTPUT
+          fi
+          blockmap_file=$(find electron/dist -type f -name "*.dmg.blockmap" | head -n 1)
+          if [ -n "$blockmap_file" ]; then
+            echo "blockmap_name=$(basename "$blockmap_file" | tr ' ' '-')" >> $GITHUB_OUTPUT
+            echo "blockmap_path=$blockmap_file" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Get artifact paths (Linux)
+        if: inputs.upload_artifacts && inputs.platform == 'linux'
+        id: artifacts-linux
+        run: |
+          appimage_file=$(find electron/dist -type f -name "*.AppImage" | head -n 1)
+          if [ -n "$appimage_file" ]; then
+            echo "appimage_name=$(basename "$appimage_file" | tr ' ' '-')" >> $GITHUB_OUTPUT
+            echo "appimage_path=$appimage_file" >> $GITHUB_OUTPUT
+          fi
+          deb_file=$(find electron/dist -type f -name "*.deb" | head -n 1)
+          if [ -n "$deb_file" ]; then
+            echo "deb_name=$(basename "$deb_file" | tr ' ' '-')" >> $GITHUB_OUTPUT
+            echo "deb_path=$deb_file" >> $GITHUB_OUTPUT
+          fi
+          targz_file=$(find electron/dist -type f -name "*.tar.gz" | head -n 1)
+          if [ -n "$targz_file" ]; then
+            echo "targz_name=$(basename "$targz_file" | tr ' ' '-')" >> $GITHUB_OUTPUT
+            echo "targz_path=$targz_file" >> $GITHUB_OUTPUT
+          fi
+
+      # Upload Windows artifacts
+      - name: Upload Windows portable EXE
+        if: inputs.upload_artifacts && inputs.platform == 'windows' && steps.artifacts-windows.outputs.portable_name
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifacts-windows.outputs.portable_name }}
+          path: ${{ steps.artifacts-windows.outputs.portable_path }}
+          retention-days: ${{ inputs.artifact_retention_days }}
+
+      - name: Upload Windows setup EXE
+        if: inputs.upload_artifacts && inputs.platform == 'windows' && steps.artifacts-windows.outputs.setup_name
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifacts-windows.outputs.setup_name }}
+          path: ${{ steps.artifacts-windows.outputs.setup_path }}
+          retention-days: ${{ inputs.artifact_retention_days }}
+
+      - name: Upload Windows blockmap
+        if: inputs.upload_artifacts && inputs.platform == 'windows' && steps.artifacts-windows.outputs.blockmap_name
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifacts-windows.outputs.blockmap_name }}
+          path: ${{ steps.artifacts-windows.outputs.blockmap_path }}
+          retention-days: ${{ inputs.artifact_retention_days }}
+
+      # Upload macOS artifacts
+      - name: Upload macOS DMG
+        if: inputs.upload_artifacts && startsWith(inputs.platform, 'macos') && steps.artifacts-macos.outputs.dmg_name
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifacts-macos.outputs.dmg_name }}
+          path: ${{ steps.artifacts-macos.outputs.dmg_path }}
+          retention-days: ${{ inputs.artifact_retention_days }}
+
+      - name: Upload macOS blockmap
+        if: inputs.upload_artifacts && startsWith(inputs.platform, 'macos') && steps.artifacts-macos.outputs.blockmap_name
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifacts-macos.outputs.blockmap_name }}
+          path: ${{ steps.artifacts-macos.outputs.blockmap_path }}
+          retention-days: ${{ inputs.artifact_retention_days }}
+
+      # Upload Linux artifacts
+      - name: Upload Linux AppImage
+        if: inputs.upload_artifacts && inputs.platform == 'linux' && steps.artifacts-linux.outputs.appimage_name
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifacts-linux.outputs.appimage_name }}
+          path: ${{ steps.artifacts-linux.outputs.appimage_path }}
+          retention-days: ${{ inputs.artifact_retention_days }}
+
+      - name: Upload Linux deb
+        if: inputs.upload_artifacts && inputs.platform == 'linux' && steps.artifacts-linux.outputs.deb_name
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifacts-linux.outputs.deb_name }}
+          path: ${{ steps.artifacts-linux.outputs.deb_path }}
+          retention-days: ${{ inputs.artifact_retention_days }}
+
+      - name: Upload Linux tar.gz
+        if: inputs.upload_artifacts && inputs.platform == 'linux' && steps.artifacts-linux.outputs.targz_name
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifacts-linux.outputs.targz_name }}
+          path: ${{ steps.artifacts-linux.outputs.targz_path }}
+          retention-days: ${{ inputs.artifact_retention_days }}
