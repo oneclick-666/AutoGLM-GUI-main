@@ -248,7 +248,15 @@ class KeyEventRequest(BaseModel):
     @field_validator("key")
     @classmethod
     def validate_key(cls, v: str) -> str:
-        allowed = {"back", "home", "recents", "volume_up", "volume_down", "power"}
+        allowed = {
+            "back",
+            "home",
+            "recents",
+            "volume_up",
+            "volume_down",
+            "power",
+            "delete",
+        }
         if v not in allowed:
             raise ValueError(f"unsupported key: {v}")
         return v

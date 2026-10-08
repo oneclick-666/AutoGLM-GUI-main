@@ -97,8 +97,8 @@ def _build_device_response_with_agent(
 
 router = APIRouter()
 
-_DEVICE_UPLOAD_MAX_BYTES = 50 * 1024 * 1024
-_DEVICE_UPLOAD_TTL_SECONDS = 5 * 60
+_DEVICE_UPLOAD_MAX_BYTES = 500 * 1024 * 1024
+_DEVICE_UPLOAD_TTL_SECONDS = 35 * 60
 _DEVICE_UPLOAD_DIR = Path(tempfile.gettempdir()) / "autoglm-device-uploads"
 
 
@@ -234,7 +234,7 @@ def upload_file_to_device(
                 size += len(chunk)
                 if size > _DEVICE_UPLOAD_MAX_BYTES:
                     raise HTTPException(
-                        status_code=413, detail="File exceeds the 50 MB limit"
+                        status_code=413, detail="File exceeds the 500 MB limit"
                     )
                 output.write(chunk)
         if size == 0:
@@ -259,11 +259,11 @@ def upload_file_to_device(
         quoted_url = shlex.quote(download_url)
         command = (
             f"mkdir -p {quoted_directory} && "
-            "curl -fL --connect-timeout 15 --max-time 180 "
+            "curl -fL --connect-timeout 15 --max-time 1800 "
             f"-o {quoted_path} {quoted_url} && "
             f"chmod 0644 {quoted_path} && sync"
         )
-        result = _run_device_shell(device_id, command, timeout=210)
+        result = _run_device_shell(device_id, command, timeout=1860)
         if result.returncode != 0:
             error = (result.stderr or result.stdout or "device download failed").strip()
             raise HTTPException(

@@ -31,6 +31,7 @@ _KEY_CODES = {
     "volume_up": "KEYCODE_VOLUME_UP",
     "volume_down": "KEYCODE_VOLUME_DOWN",
     "power": "KEYCODE_POWER",
+    "delete": "KEYCODE_DEL",
 }
 
 
