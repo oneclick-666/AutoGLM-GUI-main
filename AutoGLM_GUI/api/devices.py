@@ -140,16 +140,21 @@ def _run_device_shell(device_id: str, command: str, timeout: float = 30) -> Any:
 def _find_media_entry(
     device_id: str, collection_uri: str, display_name: str
 ) -> tuple[str | None, Any]:
-    where = shlex.quote(f"_display_name='{display_name}'")
     result = _run_device_shell(
         device_id,
         f"content query --uri {collection_uri} "
         "--projection _id:_display_name:mime_type:relative_path:is_pending "
-        f"--where {where} --sort '_id DESC'",
+        "--sort '_id DESC'",
         timeout=30,
     )
-    match = re.search(r"(?:^|[ ,])_id=(\d+)", result.stdout or "")
-    return (match.group(1) if match else None), result
+    for line in (result.stdout or "").splitlines():
+        name_match = re.search(r"(?:^|, )_display_name=([^,]*)(?:, |$)", line)
+        if not name_match or name_match.group(1) != display_name:
+            continue
+        id_match = re.search(r"(?:^|[ ,])_id=(\d+)(?:,|$)", line)
+        if id_match:
+            return id_match.group(1), result
+    return None, result
 
 
 @router.get("/api/devices/files/{token}", include_in_schema=False)
