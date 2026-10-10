@@ -255,6 +255,7 @@ class KeyEventRequest(BaseModel):
             "volume_up",
             "volume_down",
             "power",
+            "enter",
             "delete",
         }
         if v not in allowed:
