@@ -229,7 +229,15 @@ def upload_file_to_device(
                 },
                 timeout=2100,
             )
-            response.raise_for_status()
+            if response.is_error:
+                try:
+                    detail = response.json().get("detail")
+                except (ValueError, AttributeError):
+                    detail = None
+                raise RuntimeError(
+                    detail
+                    or f"pymumu file service returned HTTP {response.status_code}"
+                )
             payload = response.json()
             if not isinstance(payload, dict):
                 raise RuntimeError("pymumu returned an invalid upload response")
