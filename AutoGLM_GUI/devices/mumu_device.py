@@ -51,7 +51,7 @@ class MuMuDevice(DeviceProtocol):
             raise MuMuServiceError("pymumu returned an invalid response")
         return payload
 
-    def _control(self, action: str, **payload: Any) -> None:
+    def _control(self, action: str, **payload: Any) -> dict[str, Any]:
         with trace_span(
             f"device.{action}",
             attrs={
@@ -60,7 +60,18 @@ class MuMuDevice(DeviceProtocol):
                 "mumu_index": self.registration.index,
             },
         ):
-            self._request("POST", "/control", json={"action": action, **payload})
+            result = self._request(
+                "POST", "/control", json={"action": action, **payload}
+            )
+            if result.get("success") is not True:
+                raise MuMuServiceError(
+                    str(
+                        result.get("detail")
+                        or result.get("error")
+                        or "pymumu control failed"
+                    )
+                )
+            return result
 
     def get_screenshot(self, timeout: int = 10) -> Screenshot:
         payload = self._request("GET", "/screenshot", timeout=timeout)

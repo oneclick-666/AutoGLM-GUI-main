@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import threading
 
+import pytest
 from fastapi.testclient import TestClient
 
 import AutoGLM_GUI.api.control as control_api
 from AutoGLM_GUI.api import app
 from AutoGLM_GUI.device_manager import DeviceConnection, DeviceManager, ManagedDevice
-from AutoGLM_GUI.devices.mumu_device import AsyncMuMuDevice, MuMuDevice
+from AutoGLM_GUI.devices.mumu_device import (
+    AsyncMuMuDevice,
+    MuMuDevice,
+    MuMuServiceError,
+)
 from AutoGLM_GUI.mumu_registry import (
     clear_mumu_registrations,
     get_mumu_registration,
@@ -147,3 +152,20 @@ def test_registered_mumu_control_api_never_uses_adb(monkeypatch, tmp_path):
     assert all(response.status_code == 200 for response in responses)
     assert all(response.json()["success"] is True for response in responses)
     assert calls == ["tap", "swipe", "key", "text", "touch_down"]
+
+
+def test_mumu_device_rejects_unsuccessful_control_response(monkeypatch):
+    registration = type(
+        "Registration",
+        (),
+        {"device_id": "device", "base_url": "http://mumu", "index": 61},
+    )()
+    device = MuMuDevice(registration)  # type: ignore[arg-type]
+    monkeypatch.setattr(
+        device,
+        "_request",
+        lambda *args, **kwargs: {"success": False, "error": "input failed"},
+    )
+
+    with pytest.raises(MuMuServiceError, match="input failed"):
+        device.type_text("1")
