@@ -264,6 +264,9 @@ export interface WiFiDisconnectResponse {
 export interface WiFiManualConnectRequest {
   ip: string;
   port?: number;
+  emulator_provider?: 'mumu';
+  mumu_index?: number;
+  mumu_control_base_url?: string;
 }
 
 export interface WiFiManualConnectResponse {

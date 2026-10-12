@@ -280,6 +280,9 @@ export function DeviceSidebar({
       const result = await connectWifiManual({
         ip: manualConnectIp,
         port: parseInt(manualConnectPort, 10),
+        ...(selectedEmulator === 'mumu'
+          ? { emulator_provider: 'mumu' as const, mumu_index: 0 }
+          : {}),
       });
 
       if (result.success) {

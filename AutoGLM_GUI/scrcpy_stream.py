@@ -132,6 +132,7 @@ class ScrcpyStreamer:
         port: int = 27183,
         idr_interval_s: int = 1,
         stream_options: ScrcpyVideoStreamOptions | None = None,
+        enable_control: bool = True,
     ):
         """Initialize ScrcpyStreamer.
 
@@ -149,6 +150,7 @@ class ScrcpyStreamer:
         self.port = port
         self.idr_interval_s = idr_interval_s
         self.stream_options = stream_options or ScrcpyVideoStreamOptions()
+        self.enable_control = enable_control
 
         self.scrcpy_process: subprocess.Popen[bytes] | AsyncProcess | None = None
         self.tcp_socket: socket.socket | None = None
@@ -318,7 +320,7 @@ class ScrcpyStreamer:
             max_fps=20,
             tunnel_forward=True,
             audio=False,
-            control=True,
+            control=self.enable_control,
             cleanup=False,
             video_codec=self.stream_options.video_codec,
             send_frame_meta=self.stream_options.send_frame_meta,
@@ -431,12 +433,13 @@ class ScrcpyStreamer:
     async def _connect_socket(self) -> None:
         """Connect to scrcpy video and control sockets."""
         self.tcp_socket = await self._connect_one_socket("video")
-        try:
-            self.control_socket = await self._connect_one_socket("control")
-        except Exception:
-            self.tcp_socket.close()
-            self.tcp_socket = None
-            raise
+        if self.enable_control:
+            try:
+                self.control_socket = await self._connect_one_socket("control")
+            except Exception:
+                self.tcp_socket.close()
+                self.tcp_socket = None
+                raise
 
     async def _connect_one_socket(self, channel: str) -> socket.socket:
         """Connect one socket from the forwarded scrcpy tunnel."""

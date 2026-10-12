@@ -3,7 +3,7 @@
 import base64
 import binascii
 import re
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -447,6 +447,9 @@ class WiFiManualConnectRequest(BaseModel):
 
     ip: str  # IP 地址
     port: int = 5555  # 端口，默认 5555
+    emulator_provider: Literal["mumu"] | None = None
+    mumu_index: int | None = Field(default=None, ge=0)
+    mumu_control_base_url: str | None = None
 
     @field_validator("ip")
     @classmethod
@@ -466,6 +469,22 @@ class WiFiManualConnectRequest(BaseModel):
         if v < 1 or v > 65535:
             raise ValueError("port must be between 1 and 65535")
         return v
+
+    @field_validator("mumu_control_base_url")
+    @classmethod
+    def validate_mumu_control_base_url(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        value = v.strip().rstrip("/")
+        if not value.startswith(("http://", "https://")):
+            raise ValueError("MuMu control URL must use http or https")
+        return value
+
+    @model_validator(mode="after")
+    def validate_mumu_fields(self) -> "WiFiManualConnectRequest":
+        if self.emulator_provider == "mumu" and self.mumu_index is None:
+            self.mumu_index = 0
+        return self
 
 
 class WiFiManualConnectResponse(BaseModel):

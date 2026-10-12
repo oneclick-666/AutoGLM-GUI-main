@@ -1,11 +1,12 @@
 """Device control routes (tap/swipe/touch/keys/text)."""
 
 import asyncio
-import os
 
 from fastapi import APIRouter
 
+from AutoGLM_GUI.device_manager import DeviceManager
 from AutoGLM_GUI.devices.adb_device import ADBDevice
+from AutoGLM_GUI.mumu_registry import get_mumu_registration
 from AutoGLM_GUI.schemas import (
     ControlResponse,
     KeyEventRequest,
@@ -36,6 +37,10 @@ _KEY_CODES = {
 }
 
 
+def _async_device(device_id: str):
+    return DeviceManager.get_instance().get_async_device_protocol(device_id)
+
+
 @router.post("/api/control/tap", response_model=TapResponse)
 async def control_tap(request: TapRequest) -> TapResponse:
     """Execute tap at specified device coordinates."""
@@ -43,13 +48,18 @@ async def control_tap(request: TapRequest) -> TapResponse:
         if not request.device_id:
             return TapResponse(success=False, error="device_id is required")
 
-        device = ADBDevice(request.device_id)
-        await asyncio.to_thread(
-            device.tap,
-            x=request.x,
-            y=request.y,
-            delay=request.delay,
-        )
+        if get_mumu_registration(request.device_id):
+            await _async_device(request.device_id).tap(
+                x=request.x, y=request.y, delay=request.delay
+            )
+        else:
+            device = ADBDevice(request.device_id)
+            await asyncio.to_thread(
+                device.tap,
+                x=request.x,
+                y=request.y,
+                delay=request.delay,
+            )
 
         return TapResponse(success=True)
     except Exception as e:
@@ -63,16 +73,26 @@ async def control_swipe(request: SwipeRequest) -> SwipeResponse:
         if not request.device_id:
             return SwipeResponse(success=False, error="device_id is required")
 
-        device = ADBDevice(request.device_id)
-        await asyncio.to_thread(
-            device.swipe,
-            start_x=request.start_x,
-            start_y=request.start_y,
-            end_x=request.end_x,
-            end_y=request.end_y,
-            duration_ms=request.duration_ms,
-            delay=request.delay,
-        )
+        if get_mumu_registration(request.device_id):
+            await _async_device(request.device_id).swipe(
+                start_x=request.start_x,
+                start_y=request.start_y,
+                end_x=request.end_x,
+                end_y=request.end_y,
+                duration_ms=request.duration_ms,
+                delay=request.delay,
+            )
+        else:
+            device = ADBDevice(request.device_id)
+            await asyncio.to_thread(
+                device.swipe,
+                start_x=request.start_x,
+                start_y=request.start_y,
+                end_x=request.end_x,
+                end_y=request.end_y,
+                duration_ms=request.duration_ms,
+                delay=request.delay,
+            )
 
         return SwipeResponse(success=True)
     except Exception as e:
@@ -83,6 +103,13 @@ async def control_swipe(request: SwipeRequest) -> SwipeResponse:
 async def control_keyevent(request: KeyEventRequest) -> ControlResponse:
     """Send a supported Android hardware/navigation key."""
     try:
+        if get_mumu_registration(request.device_id):
+            device = _async_device(request.device_id)
+            await device.key_event(request.key)  # type: ignore[attr-defined]
+            return ControlResponse(success=True)
+
+        import os
+
         from AutoGLM_GUI.platform_utils import run_cmd_silently
 
         adb_path = os.getenv("AUTOGLM_ADB_PATH", "adb")
@@ -109,6 +136,10 @@ async def control_keyevent(request: KeyEventRequest) -> ControlResponse:
 async def control_text(request: TextInputRequest) -> ControlResponse:
     """Paste UTF-8 text through scrcpy without replacing the device IME."""
     try:
+        if get_mumu_registration(request.device_id):
+            await _async_device(request.device_id).type_text(request.text)
+            return ControlResponse(success=True)
+
         from AutoGLM_GUI.socketio_server import paste_text
 
         await paste_text(request.device_id, request.text)
@@ -121,6 +152,11 @@ async def control_text(request: TextInputRequest) -> ControlResponse:
 async def control_touch_down(request: TouchDownRequest) -> TouchDownResponse:
     """Send touch DOWN event at specified device coordinates."""
     try:
+        if get_mumu_registration(request.device_id or ""):
+            device = _async_device(request.device_id or "")
+            await device.touch_down(request.x, request.y, request.delay)  # type: ignore[attr-defined]
+            return TouchDownResponse(success=True)
+
         from AutoGLM_GUI.adb_plus import touch_down_async
 
         await touch_down_async(
@@ -139,6 +175,11 @@ async def control_touch_down(request: TouchDownRequest) -> TouchDownResponse:
 async def control_touch_move(request: TouchMoveRequest) -> TouchMoveResponse:
     """Send touch MOVE event at specified device coordinates."""
     try:
+        if get_mumu_registration(request.device_id or ""):
+            device = _async_device(request.device_id or "")
+            await device.touch_move(request.x, request.y, request.delay)  # type: ignore[attr-defined]
+            return TouchMoveResponse(success=True)
+
         from AutoGLM_GUI.adb_plus import touch_move_async
 
         await touch_move_async(
@@ -157,6 +198,11 @@ async def control_touch_move(request: TouchMoveRequest) -> TouchMoveResponse:
 async def control_touch_up(request: TouchUpRequest) -> TouchUpResponse:
     """Send touch UP event at specified device coordinates."""
     try:
+        if get_mumu_registration(request.device_id or ""):
+            device = _async_device(request.device_id or "")
+            await device.touch_up(request.x, request.y, request.delay)  # type: ignore[attr-defined]
+            return TouchUpResponse(success=True)
+
         from AutoGLM_GUI.adb_plus import touch_up_async
 
         await touch_up_async(

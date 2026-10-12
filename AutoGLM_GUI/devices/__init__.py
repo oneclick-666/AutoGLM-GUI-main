@@ -25,6 +25,7 @@ from AutoGLM_GUI.devices.adb_device import (
 )
 from AutoGLM_GUI.devices.async_adapter import AsyncDeviceAdapter
 from AutoGLM_GUI.devices.mock_device import MockDevice
+from AutoGLM_GUI.devices.mumu_device import AsyncMuMuDevice, MuMuDevice
 from AutoGLM_GUI.devices.remote_device import RemoteDevice, RemoteDeviceManager
 
 __all__ = [
@@ -34,6 +35,8 @@ __all__ = [
     "AsyncADBDeviceManager",
     "AsyncDeviceAdapter",
     "MockDevice",
+    "MuMuDevice",
+    "AsyncMuMuDevice",
     "RemoteDevice",
     "RemoteDeviceManager",
 ]

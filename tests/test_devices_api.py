@@ -14,6 +14,11 @@ import AutoGLM_GUI.api.devices as devices_api
 import AutoGLM_GUI.device_group_manager as device_group_manager_module
 import AutoGLM_GUI.device_manager as device_manager_module
 import AutoGLM_GUI.phone_agent_manager as phone_agent_manager_module
+from AutoGLM_GUI.mumu_registry import (
+    clear_mumu_registrations,
+    get_mumu_registration,
+    register_mumu_device,
+)
 
 pytestmark = [pytest.mark.contract, pytest.mark.release_gate]
 
@@ -160,10 +165,14 @@ class FakeDeviceManager:
 
 
 @pytest.fixture
-def devices_env(monkeypatch: pytest.MonkeyPatch) -> dict:
+def devices_env(monkeypatch: pytest.MonkeyPatch, tmp_path) -> dict:
     fake_device_manager = FakeDeviceManager()
     fake_agent_manager = FakePhoneAgentManager()
     fake_group_manager = FakeDeviceGroupManager()
+    monkeypatch.setenv(
+        "AUTOGLM_MUMU_REGISTRY_FILE", str(tmp_path / "mumu-registry.json")
+    )
+    clear_mumu_registrations()
 
     monkeypatch.setattr(
         device_manager_module.DeviceManager,
@@ -273,6 +282,7 @@ def test_connect_wifi_failure_maps_not_found_error(devices_env: dict) -> None:
 
 
 def test_disconnect_wifi_success_refreshes(devices_env: dict) -> None:
+    register_mumu_device("192.168.0.20:5555", 0, "http://windows-host:8765")
     response = devices_env["client"].post(
         "/api/devices/disconnect_wifi",
         json={"device_id": "192.168.0.20:5555"},
@@ -288,6 +298,7 @@ def test_disconnect_wifi_success_refreshes(devices_env: dict) -> None:
         devices_env["device_manager"].last_disconnect_wifi_device == "192.168.0.20:5555"
     )
     assert devices_env["device_manager"].force_refresh_calls == 1
+    assert get_mumu_registration("192.168.0.20:5555") is None
 
 
 def test_connect_wifi_manual_failure_maps_invalid_ip(devices_env: dict) -> None:
@@ -309,6 +320,48 @@ def test_connect_wifi_manual_failure_maps_invalid_ip(devices_env: dict) -> None:
         "device_id": None,
         "error": "invalid_ip",
     }
+
+
+def test_connect_mumu_requires_control_service_before_adb(devices_env: dict) -> None:
+    response = devices_env["client"].post(
+        "/api/devices/connect_wifi_manual",
+        json={
+            "ip": "127.0.0.1",
+            "port": 7555,
+            "emulator_provider": "mumu",
+            "mumu_index": 0,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["error"] == "mumu_control_url_required"
+    assert devices_env["device_manager"].last_connect_wifi_manual_args is None
+
+
+def test_connect_mumu_registers_pymumu_control(devices_env: dict) -> None:
+    devices_env["device_manager"].connect_wifi_manual_result = (
+        True,
+        "Connected",
+        "127.0.0.1:7555",
+    )
+
+    response = devices_env["client"].post(
+        "/api/devices/connect_wifi_manual",
+        json={
+            "ip": "127.0.0.1",
+            "port": 7555,
+            "emulator_provider": "mumu",
+            "mumu_index": 3,
+            "mumu_control_base_url": "http://windows-host:8765/",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["success"] is True
+    registration = get_mumu_registration("127.0.0.1:7555")
+    assert registration is not None
+    assert registration.index == 3
+    assert registration.base_url == "http://windows-host:8765"
 
 
 def test_pair_wifi_failure_maps_invalid_pairing_code(devices_env: dict) -> None:

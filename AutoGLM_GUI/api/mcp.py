@@ -7,7 +7,6 @@ from typing_extensions import TypedDict
 
 from fastmcp import FastMCP
 
-from AutoGLM_GUI.adb_plus import capture_screenshot_async
 from AutoGLM_GUI.exceptions import DeviceNotAvailableError
 from AutoGLM_GUI.logger import logger
 from AutoGLM_GUI.prompts import MCP_SYSTEM_PROMPT_ZH
@@ -206,7 +205,15 @@ async def screenshot(device_id: str) -> ScreenshotResponse:
                 is_sensitive=shot.is_sensitive,
             )
 
-        shot = await capture_screenshot_async(device_id=device_id)
+        from AutoGLM_GUI.mumu_registry import get_mumu_registration
+
+        if get_mumu_registration(device_id):
+            device = device_manager.get_async_device_protocol(device_id)
+            shot = await device.get_screenshot(timeout=10)
+        else:
+            from AutoGLM_GUI.adb_plus import capture_screenshot_async
+
+            shot = await capture_screenshot_async(device_id=device_id)
         return ScreenshotResponse(
             success=True,
             image=shot.base64_data,

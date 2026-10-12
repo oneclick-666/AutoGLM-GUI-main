@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import httpx
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
@@ -211,6 +212,33 @@ def upload_file_to_device(
     file: UploadFile = File(...),
 ) -> dict[str, Any]:
     """Let the selected device download a temporary upload into its Download folder."""
+    from AutoGLM_GUI.mumu_registry import get_mumu_registration
+
+    mumu = get_mumu_registration(device_id)
+    if mumu:
+        try:
+            file.file.seek(0)
+            response = httpx.post(
+                f"{mumu.base_url}/api/v1/emulators/{mumu.index}/files",
+                files={
+                    "file": (
+                        file.filename or "upload.bin",
+                        file.file,
+                        file.content_type or "application/octet-stream",
+                    )
+                },
+                timeout=2100,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise RuntimeError("pymumu returned an invalid upload response")
+            return payload
+        except Exception as error:
+            raise HTTPException(
+                status_code=502, detail=f"pymumu file upload failed: {error}"
+            ) from error
+
     base_url = os.getenv("AUTOGLM_DEVICE_DOWNLOAD_BASE_URL", "").strip().rstrip("/")
     if not base_url:
         raise HTTPException(
@@ -434,6 +462,9 @@ def disconnect_wifi(request: WiFiDisconnectRequest) -> WiFiDisconnectResponse:
     success, message = device_manager.disconnect_wifi(request.device_id)
 
     if success:
+        from AutoGLM_GUI.mumu_registry import unregister_mumu_device
+
+        unregister_mumu_device(request.device_id)
         # Refresh device list to update status
         device_manager.force_refresh()
 
@@ -452,6 +483,23 @@ def connect_wifi_manual(
 ) -> WiFiManualConnectResponse:
     """手动连接到 WiFi 设备 (直接连接,无需 USB)."""
     from AutoGLM_GUI.device_manager import DeviceManager
+    from AutoGLM_GUI.mumu_registry import register_mumu_device
+
+    mumu_base_url: str | None = None
+    if request.emulator_provider == "mumu":
+        mumu_base_url = (
+            request.mumu_control_base_url
+            or os.getenv("AUTOGLM_MUMU_API_URL", "").strip()
+        )
+        if not mumu_base_url:
+            return WiFiManualConnectResponse(
+                success=False,
+                message=(
+                    "MuMu control service URL is required; set "
+                    "AUTOGLM_MUMU_API_URL or mumu_control_base_url"
+                ),
+                error="mumu_control_url_required",
+            )
 
     device_manager = DeviceManager.get_instance()
     success, message, device_id = device_manager.connect_wifi_manual(
@@ -460,6 +508,26 @@ def connect_wifi_manual(
     )
 
     if success:
+        if request.emulator_provider == "mumu":
+            if not device_id:
+                return WiFiManualConnectResponse(
+                    success=False,
+                    message="MuMu video connection did not return a device ID",
+                    error="connect_failed",
+                )
+            try:
+                register_mumu_device(
+                    device_id,
+                    request.mumu_index or 0,
+                    mumu_base_url or "",
+                )
+            except Exception as error:
+                device_manager.disconnect_wifi(device_id)
+                return WiFiManualConnectResponse(
+                    success=False,
+                    message=f"Failed to register pymumu control: {error}",
+                    error="mumu_control_registration_failed",
+                )
         # Refresh device list to show new device
         device_manager.force_refresh()
 

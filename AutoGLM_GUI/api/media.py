@@ -88,7 +88,13 @@ async def take_screenshot(request: ScreenshotRequest) -> ScreenshotResponse:
                     is_sensitive=screenshot.is_sensitive,
                 )
 
-        screenshot = await capture_screenshot_async(device_id=device_id)
+        from AutoGLM_GUI.mumu_registry import get_mumu_registration
+
+        if get_mumu_registration(device_id):
+            device = device_manager.get_async_device_protocol(device_id)
+            screenshot = await device.get_screenshot(timeout=10)
+        else:
+            screenshot = await capture_screenshot_async(device_id=device_id)
         return ScreenshotResponse(
             success=True,
             image=screenshot.base64_data,

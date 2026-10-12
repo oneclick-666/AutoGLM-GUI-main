@@ -1094,6 +1094,14 @@ class DeviceManager:
             local_device_id = managed.primary_device_id
             local_managed = managed
 
+        from AutoGLM_GUI.mumu_registry import get_mumu_registration
+
+        mumu = get_mumu_registration(local_device_id)
+        if mumu:
+            from AutoGLM_GUI.devices.mumu_device import MuMuDevice
+
+            return MuMuDevice(mumu)
+
         self._ensure_adb_keyboard_once(local_device_id, local_managed)
 
         from AutoGLM_GUI.devices.adb_device import ADBDevice
@@ -1125,6 +1133,14 @@ class DeviceManager:
 
             local_device_id = managed.primary_device_id
             local_managed = managed
+
+        from AutoGLM_GUI.mumu_registry import get_mumu_registration
+
+        mumu = get_mumu_registration(local_device_id)
+        if mumu:
+            from AutoGLM_GUI.devices.mumu_device import AsyncMuMuDevice
+
+            return AsyncMuMuDevice(mumu)
 
         self._ensure_adb_keyboard_once(local_device_id, local_managed)
 

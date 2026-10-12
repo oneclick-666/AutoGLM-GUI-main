@@ -17,6 +17,7 @@ from typing_extensions import TypedDict
 import socketio
 
 from AutoGLM_GUI.logger import logger
+from AutoGLM_GUI.mumu_registry import get_mumu_registration
 from AutoGLM_GUI.scrcpy_protocol import ScrcpyMediaStreamPacket
 from AutoGLM_GUI.scrcpy_stream import ScrcpyStreamer
 
@@ -246,11 +247,14 @@ async def connect_device(sid: str, data: dict[str, Any] | None) -> None:
             logger.info(f"Stopping existing stream for device {device_id} from sid {s}")
             await _stop_stream_for_sid(s)
 
-        streamer = ScrcpyStreamer(
-            device_id=device_id,
-            max_size=max_size,
-            bit_rate=bit_rate,
-        )
+        streamer_kwargs: dict[str, Any] = {
+            "device_id": device_id,
+            "max_size": max_size,
+            "bit_rate": bit_rate,
+        }
+        if get_mumu_registration(device_id):
+            streamer_kwargs["enable_control"] = False
+        streamer = ScrcpyStreamer(**streamer_kwargs)
 
         try:
             await streamer.start()  # ScrcpyStreamer has built-in retry logic
