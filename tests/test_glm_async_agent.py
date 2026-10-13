@@ -91,6 +91,9 @@ def test_openai_request_uses_max_tokens_by_default(monkeypatch):
 
     assert captured["max_tokens"] == 3000
     assert "max_completion_tokens" not in captured
+    assert captured["temperature"] == 0.0
+    assert captured["top_p"] == 0.85
+    assert captured["frequency_penalty"] == 0.2
 
 
 def test_openai_request_uses_max_completion_tokens_when_configured(monkeypatch):
@@ -110,6 +113,26 @@ def test_openai_request_uses_max_completion_tokens_when_configured(monkeypatch):
 
     assert captured["max_completion_tokens"] == 222
     assert "max_tokens" not in captured
+
+
+def test_openai_request_can_omit_sampling_parameters(monkeypatch):
+    agent = AsyncGLMAgent(
+        model_config=ModelConfig(include_sampling_parameters=False),
+        agent_config=AgentConfig(max_steps=10, verbose=False),
+        device=_FakeDevice(),
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _EmptyStream()
+
+    monkeypatch.setattr(agent.openai_client.chat.completions, "create", fake_create)
+    asyncio.run(_drain(agent._stream_openai([])))
+
+    assert "temperature" not in captured
+    assert "top_p" not in captured
+    assert "frequency_penalty" not in captured
 
 
 # ---------------------------------------------------------------------------

@@ -52,6 +52,17 @@ def test_model_config_requires_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     assert exc_info.value.status_code == 503
 
 
+def test_model_config_uses_modern_completion_parameters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AUTOGLM_XHS_COMMENT_API_KEY", "test-key")
+
+    config = _model_config()
+
+    assert config.max_completion_tokens == 3000
+    assert config.include_sampling_parameters is False
+
+
 def test_mumu_device_registration_does_not_connect_adb(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

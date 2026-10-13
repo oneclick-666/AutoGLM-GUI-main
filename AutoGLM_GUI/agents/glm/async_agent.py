@@ -358,12 +358,15 @@ class AsyncGLMAgent(AsyncAgentBase, AsyncAgent):
         request_kwargs: dict[str, Any] = {
             "messages": messages,
             "model": self.model_config.model_name,
-            "temperature": self.model_config.temperature,
-            "top_p": self.model_config.top_p,
-            "frequency_penalty": self.model_config.frequency_penalty,
             "extra_body": self.model_config.extra_body,
             "stream": True,
         }
+        if self.model_config.include_sampling_parameters:
+            request_kwargs.update(
+                temperature=self.model_config.temperature,
+                top_p=self.model_config.top_p,
+                frequency_penalty=self.model_config.frequency_penalty,
+            )
         if self.model_config.max_completion_tokens is not None:
             request_kwargs["max_completion_tokens"] = (
                 self.model_config.max_completion_tokens

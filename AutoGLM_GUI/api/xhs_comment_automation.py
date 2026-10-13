@@ -259,7 +259,7 @@ def _model_config() -> ModelConfig:
         api_key=api_key,
         model_name=os.getenv("AUTOGLM_XHS_COMMENT_MODEL", "gpt-6.1-sol").strip(),
         max_completion_tokens=3000,
-        temperature=0.0,
+        include_sampling_parameters=False,
         lang="cn",
     )
 

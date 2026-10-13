@@ -24,6 +24,7 @@ class ModelConfig:
         model_name: 模型标识符 (例如: "autoglm-phone-9b")
         max_tokens: 响应最大 token 数 (默认: 3000)
         max_completion_tokens: 新版 OpenAI 模型的响应最大 token 数；设置后替代 max_tokens
+        include_sampling_parameters: 是否发送 temperature、top_p 和 frequency_penalty
         temperature: 采样温度 0-1 (默认: 0.0)
         top_p: Nucleus 采样阈值 (默认: 0.85)
         frequency_penalty: 频率惩罚 -2 到 2 (默认: 0.2)
@@ -36,6 +37,7 @@ class ModelConfig:
     model_name: str = "autoglm-phone-9b"
     max_tokens: int = 3000
     max_completion_tokens: int | None = None
+    include_sampling_parameters: bool = True
     temperature: float = 0.0
     top_p: float = 0.85
     frequency_penalty: float = 0.2
