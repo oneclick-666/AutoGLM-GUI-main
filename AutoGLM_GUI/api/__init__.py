@@ -39,6 +39,7 @@ from . import (
     tasks,
     version,
     workflows,
+    xhs_comment_automation,
 )
 
 
@@ -208,6 +209,7 @@ def create_app() -> FastAPI:
     app.include_router(tasks.router)
     app.include_router(version.router)
     app.include_router(workflows.router)
+    app.include_router(xhs_comment_automation.router)
 
     # Mount static files BEFORE MCP to ensure they have priority
     # This is critical: FastAPI processes mounts in order, so static files

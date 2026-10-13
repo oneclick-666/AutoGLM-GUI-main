@@ -61,6 +61,17 @@ class AsyncGLMAgent(AsyncAgentBase, AsyncAgent):
         # official Open-AutoGLM layout.
         self._pending_task: str | None = None
         self._pending_reference_images: list[dict[str, str]] = []
+        self._persistent_reference_images: list[dict[str, str]] = []
+
+    def set_persistent_reference_images(
+        self, attachments: list[dict[str, str]]
+    ) -> None:
+        """Keep task reference images visible to the model on every step."""
+        self._persistent_reference_images = attachments.copy()
+
+    def reset(self) -> None:
+        super().reset()
+        self._persistent_reference_images = []
 
     def _get_default_system_prompt(self, lang: str) -> str:
         return get_system_prompt(lang)
@@ -143,7 +154,10 @@ class AsyncGLMAgent(AsyncAgentBase, AsyncAgent):
                 self._pending_reference_images = []
             else:
                 text_content = f"** Screen Info **\n\n{screen_info}"
-                images = [{"mime_type": "image/png", "data": screenshot.base64_data}]
+                images = [
+                    {"mime_type": "image/png", "data": screenshot.base64_data},
+                    *self._persistent_reference_images,
+                ]
             self._context.append(
                 MessageBuilder.create_user_message_with_images(
                     text=text_content,

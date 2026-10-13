@@ -33,6 +33,18 @@ sidebar_position: 2
 | `AUTOGLM_DEFAULT_MAX_STEPS` | `100` | 经典模式单次任务的最大步数 |
 | `AUTOGLM_LAYERED_MAX_TURNS` | `50` | 分层代理模式的最大轮数 |
 
+## 小红书评论自动化
+
+`POST /api/automations/xhs/comments` 使用独立模型配置，避免影响普通聊天任务。密钥只通过环境变量提供。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `AUTOGLM_XHS_COMMENT_BASE_URL` | `https://api.chatanywhere.tech/v1` | 小红书评论视觉模型 API 地址 |
+| `AUTOGLM_XHS_COMMENT_MODEL` | `gpt-6.1-sol` | 小红书评论模型名称 |
+| `AUTOGLM_XHS_COMMENT_API_KEY` | 未设置 | 模型 API 密钥（必填） |
+| `AUTOGLM_XHS_COMMENT_MAX_STEPS` | `80` | 单次评论任务最大操作步数 |
+| `AUTOGLM_XHS_COMMENT_TIMEOUT_SECONDS` | `900` | 单次评论任务超时秒数 |
+
 ## 服务与日志
 
 | 变量 | 默认值 | 说明 |

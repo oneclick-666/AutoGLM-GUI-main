@@ -230,3 +230,33 @@ def test_user_reference_images_are_sent_on_first_request_only(monkeypatch):
     assert _count_images(captured[0]) == 2
     assert _count_images(captured[1]) == 1
     assert "User attached 1 reference image" in _text_part(captured[0][-1])
+
+
+def test_persistent_reference_images_are_sent_on_later_requests(monkeypatch):
+    agent = _make_agent()
+    agent.set_persistent_reference_images([{"mime_type": "image/jpeg", "data": "ref1"}])
+    captured: list[list[dict[str, Any]]] = []
+
+    async def fake_stream(messages):
+        captured.append(copy.deepcopy(messages))
+        yield {"type": "raw", "content": "finish(message=ok)"}
+
+    monkeypatch.setattr(agent, "_stream_openai", fake_stream)
+    monkeypatch.setattr(
+        agent.action_handler,
+        "execute",
+        lambda *a, **k: ActionResult(success=True, should_finish=True, message="ok"),
+    )
+
+    async def run() -> None:
+        agent._prepare_initial_context("pick the matching image", "img0", "gallery")
+        await _drain(agent._execute_step())
+        await _drain(agent._execute_step())
+
+    asyncio.run(run())
+
+    assert _count_images(captured[0]) == 1
+    assert _count_images(captured[1]) == 2
+
+    agent.reset()
+    assert agent._persistent_reference_images == []

@@ -28,6 +28,24 @@ sidebar_position: 3
 | POST | `/api/layered-agent/abort` | 中止 |
 | POST | `/api/layered-agent/reset` | 重置 |
 
+## 小红书评论自动化
+
+`POST /api/automations/xhs/comments` 使用 `multipart/form-data`。`device` 是与手动连接接口一致的 JSON 字符串，图片通过重复的 `images` 字段传入。
+
+```bash
+curl http://127.0.0.1:8766/api/automations/xhs/comments \
+  -F 'device={"ip":"192.168.31.44","port":5555,"emulator_provider":"mumu","mumu_index":61,"mumu_control_base_url":"http://192.168.31.44:8000"}' \
+  -F 'red_id=目标RED ID' \
+  -F 'user_name=目标用户名' \
+  -F 'note_title=目标笔记标题' \
+  -F 'note_like_number=1.2万' \
+  -F 'comment_text=评论内容' \
+  -F 'images=@/path/to/first.jpg' \
+  -F 'images=@/path/to/second.jpg'
+```
+
+图片为可选项。接口仅在实时截图中识别到发送后的 Toast 时返回 `success: true`，`toast` 字段为识别到的原文。模型配置见[环境变量](./env-vars.md#小红书评论自动化)。
+
 ## 异步任务
 
 | 方法 | 路径 | 说明 |

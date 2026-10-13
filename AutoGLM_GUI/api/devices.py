@@ -205,10 +205,9 @@ def download_device_upload(token: str) -> FileResponse:
     return FileResponse(stored_path, media_type="application/octet-stream")
 
 
-@router.post("/api/devices/files")
-def upload_file_to_device(
-    device_id: str = Form(...),
-    file: UploadFile = File(...),
+def save_uploaded_file_to_device(
+    device_id: str,
+    file: UploadFile,
 ) -> dict[str, Any]:
     """Let the selected device download a temporary upload into its Download folder."""
     base_url = os.getenv("AUTOGLM_DEVICE_DOWNLOAD_BASE_URL", "").strip().rstrip("/")
@@ -355,6 +354,15 @@ def upload_file_to_device(
         }
     finally:
         stored_path.unlink(missing_ok=True)
+
+
+@router.post("/api/devices/files")
+def upload_file_to_device(
+    device_id: str = Form(...),
+    file: UploadFile = File(...),
+) -> dict[str, Any]:
+    """Upload a file with the shared device-side download implementation."""
+    return save_uploaded_file_to_device(device_id, file)
 
 
 @router.get("/api/devices", response_model=DeviceListResponse)
