@@ -36,7 +36,9 @@ class MuMuDevice(DeviceProtocol):
         )
 
     def _request(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:
-        with httpx.Client(timeout=self._timeout) as client:
+        # MuMu is a LAN service. System HTTP proxy settings can route private
+        # addresses through a proxy and turn a millisecond request into a timeout.
+        with httpx.Client(timeout=self._timeout, trust_env=False) as client:
             response = client.request(method, f"{self._instance_url}{path}", **kwargs)
         if response.is_error:
             try:

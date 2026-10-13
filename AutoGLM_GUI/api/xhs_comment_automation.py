@@ -11,6 +11,7 @@ import re
 import uuid
 from typing import Any
 
+import httpx
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
@@ -65,14 +66,6 @@ def _ensure_device(request: WiFiManualConnectRequest) -> str:
     from AutoGLM_GUI.mumu_registry import register_mumu_device
 
     device_id = f"{request.ip}:{request.port}"
-    manager = DeviceManager.get_instance()
-    existing = manager.get_device_by_device_id(device_id)
-    if existing is None:
-        response = connect_wifi_manual(request)
-        if not response.success or not response.device_id:
-            raise HTTPException(status_code=502, detail=response.message)
-        return response.device_id
-
     if request.emulator_provider == "mumu":
         base_url = (
             request.mumu_control_base_url
@@ -86,7 +79,31 @@ def _ensure_device(request: WiFiManualConnectRequest) -> str:
                     "AUTOGLM_MUMU_API_URL)"
                 ),
             )
-        register_mumu_device(device_id, request.mumu_index or 0, base_url)
+        try:
+            registration = register_mumu_device(
+                device_id, request.mumu_index or 0, base_url
+            )
+            with httpx.Client(timeout=10, trust_env=False) as client:
+                response = client.get(
+                    f"{registration.base_url}/api/v1/emulators/"
+                    f"{registration.index}/current-app"
+                )
+            response.raise_for_status()
+        except Exception as error:
+            raise HTTPException(
+                status_code=502,
+                detail=f"MuMu control service is unavailable: {error}",
+            ) from error
+        return device_id
+
+    manager = DeviceManager.get_instance()
+    existing = manager.get_device_by_device_id(device_id)
+    if existing is None:
+        response = connect_wifi_manual(request)
+        if not response.success or not response.device_id:
+            raise HTTPException(status_code=502, detail=response.message)
+        return response.device_id
+
     return device_id
 
 
@@ -128,10 +145,40 @@ async def _prepare_images(
             )
         references.append(await asyncio.to_thread(_reference_image, data))
         await image.seek(0)
-        uploaded.append(
-            await asyncio.to_thread(save_uploaded_file_to_device, device_id, image)
-        )
+        uploaded.append(await asyncio.to_thread(_upload_image, device_id, image))
     return uploaded, references
+
+
+def _upload_image(device_id: str, image: UploadFile) -> dict[str, Any]:
+    """Upload through pymumu for MuMu, otherwise use the existing device flow."""
+    from AutoGLM_GUI.mumu_registry import get_mumu_registration
+
+    registration = get_mumu_registration(device_id)
+    if registration is None:
+        return save_uploaded_file_to_device(device_id, image)
+
+    try:
+        image.file.seek(0)
+        with httpx.Client(timeout=300, trust_env=False) as client:
+            response = client.post(
+                f"{registration.base_url}/api/v1/emulators/{registration.index}/files",
+                files={
+                    "file": (
+                        image.filename or "upload.bin",
+                        image.file,
+                        image.content_type or "application/octet-stream",
+                    )
+                },
+            )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("pymumu returned an invalid upload response")
+        return payload
+    except Exception as error:
+        raise HTTPException(
+            status_code=502, detail=f"pymumu file upload failed: {error}"
+        ) from error
 
 
 def _build_system_prompt() -> str:
@@ -223,15 +270,45 @@ async def _run_agent(
     reference_images: list[dict[str, str]],
     model_config: ModelConfig,
 ) -> tuple[bool, str, int]:
+    from AutoGLM_GUI.agents.glm.async_agent import AsyncGLMAgent
+    from AutoGLM_GUI.devices.mumu_device import MuMuDevice
+    from AutoGLM_GUI.mumu_registry import get_mumu_registration
     from AutoGLM_GUI.phone_agent_manager import PhoneAgentManager
+
+    registration = get_mumu_registration(device_id)
+    if registration is not None:
+        mumu_device = MuMuDevice(registration, timeout=30)
+        agent = AsyncGLMAgent(  # type: ignore[abstract]
+            model_config=model_config,
+            agent_config=AgentConfig(
+                device_id=device_id,
+                max_steps=int(os.getenv("AUTOGLM_XHS_COMMENT_MAX_STEPS", "80")),
+                lang="cn",
+                system_prompt=_build_system_prompt(),
+                verbose=True,
+            ),
+            device=mumu_device,
+            takeover_callback=lambda message: logger.info(
+                "XHS comment task requested takeover: {}", message
+            ),
+            confirmation_callback=lambda _message: True,
+        )
+        agent.action_handler = HumanizedAsyncActionHandler(
+            device=agent.device,
+            takeover_callback=lambda message: logger.info(
+                "XHS comment task requested takeover: {}", message
+            ),
+            confirmation_callback=lambda _message: True,
+        )
+        if reference_images:
+            agent.set_user_image_attachments(reference_images)
+            agent.set_persistent_reference_images(reference_images)
+        return await _stream_agent(agent, task)
 
     manager = PhoneAgentManager.get_instance()
     context = f"xhs-comment:{uuid.uuid4().hex}"
     agent_key = f"{device_id}:{context}"
     acquired = False
-    final_success = False
-    final_message = "Task ended without a result"
-    steps = 0
 
     def noop_takeover(message: str) -> None:
         logger.info("XHS comment task requested takeover: {}", message)
@@ -268,6 +345,18 @@ async def _run_agent(
             auto_initialize=False,
             context=context,
         )
+        return await _stream_agent(agent, task)
+    finally:
+        if acquired:
+            await manager.release_device_async(device_id, context=context)
+        await manager.destroy_agent_async(device_id, context=context)
+
+
+async def _stream_agent(agent: Any, task: str) -> tuple[bool, str, int]:
+    final_success = False
+    final_message = "Task ended without a result"
+    steps = 0
+    try:
         timeout = int(os.getenv("AUTOGLM_XHS_COMMENT_TIMEOUT_SECONDS", "900"))
         async with asyncio.timeout(timeout):
             async for event in agent.stream(task):
@@ -283,11 +372,8 @@ async def _run_agent(
                     final_message = str(data.get("message") or event.get("type"))
         return final_success, final_message, steps
     except TimeoutError:
+        await agent.cancel()
         return False, "Automation timed out", steps
-    finally:
-        if acquired:
-            await manager.release_device_async(device_id, context=context)
-        await manager.destroy_agent_async(device_id, context=context)
 
 
 @router.post("/comments", response_model=XHSCommentResponse)
