@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import random
 from types import SimpleNamespace
 
@@ -19,6 +20,7 @@ from AutoGLM_GUI.api.xhs_comment_automation import (
     _ensure_device,
     _model_config,
     _parse_device,
+    _stream_agent,
     _upload_image,
 )
 
@@ -59,7 +61,7 @@ def test_model_config_uses_modern_completion_parameters(
 
     config = _model_config()
 
-    assert config.max_completion_tokens == 3000
+    assert config.max_completion_tokens == 8000
     assert config.include_sampling_parameters is False
 
 
@@ -231,3 +233,65 @@ def test_comment_endpoint_returns_verified_toast(
         "steps": 12,
         "uploaded_images": [],
     }
+
+
+def test_stream_agent_continues_after_unverified_finish() -> None:
+    class FakeAgent:
+        def __init__(self) -> None:
+            self.continuations: list[str | None] = []
+
+        async def stream(self, _task, *, continue_with=None):
+            self.continuations.append(continue_with)
+            if continue_with is None:
+                yield {
+                    "type": "step",
+                    "data": {
+                        "step": 1,
+                        "action": {"_metadata": "finish", "message": "done"},
+                        "success": True,
+                        "finished": True,
+                    },
+                }
+                yield {
+                    "type": "done",
+                    "data": {"message": "done", "steps": 1, "success": True},
+                }
+            else:
+                yield {
+                    "type": "done",
+                    "data": {
+                        "message": "ERROR:未找到目标",
+                        "steps": 2,
+                        "success": True,
+                    },
+                }
+
+        async def cancel(self):
+            pass
+
+    agent = FakeAgent()
+    result = asyncio.run(_stream_agent(agent, "task"))
+
+    assert result == (True, "ERROR:未找到目标", 2)
+    assert agent.continuations[0] is None
+    assert "提前结束" in (agent.continuations[1] or "")
+
+
+def test_stream_agent_rejects_unverified_finish_after_retries() -> None:
+    class FakeAgent:
+        async def stream(self, _task, *, continue_with=None):
+            yield {
+                "type": "done",
+                "data": {"message": "done", "steps": 1, "success": True},
+            }
+
+        async def cancel(self):
+            pass
+
+    result = asyncio.run(_stream_agent(FakeAgent(), "task"))
+
+    assert result == (
+        False,
+        "Model ended automation without TOAST: or ERROR: after 3 attempts",
+        1,
+    )

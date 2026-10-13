@@ -10,6 +10,7 @@ images for the first turn. History must not retain images.
 
 import asyncio
 import copy
+from types import SimpleNamespace
 from typing import Any
 
 from AutoGLM_GUI.actions import ActionResult
@@ -60,6 +61,23 @@ class _EmptyStream:
 
     async def __anext__(self):
         raise StopAsyncIteration
+
+    async def close(self) -> None:
+        pass
+
+
+class _ChunkStream:
+    def __init__(self, chunks):
+        self._chunks = iter(chunks)
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        try:
+            return next(self._chunks)
+        except StopIteration as error:
+            raise StopAsyncIteration from error
 
     async def close(self) -> None:
         pass
@@ -133,6 +151,66 @@ def test_openai_request_can_omit_sampling_parameters(monkeypatch):
     assert "temperature" not in captured
     assert "top_p" not in captured
     assert "frequency_penalty" not in captured
+
+
+def test_openai_stream_uses_reasoning_content_when_content_is_empty(monkeypatch):
+    agent = _make_agent()
+    stream = _ChunkStream(
+        [
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(
+                            content=None,
+                            reasoning_content='do(action="Launch", app="小红书")',
+                        )
+                    )
+                ]
+            )
+        ]
+    )
+
+    async def fake_create(**_kwargs):
+        return stream
+
+    monkeypatch.setattr(agent.openai_client.chat.completions, "create", fake_create)
+
+    async def collect():
+        return [item async for item in agent._stream_openai([])]
+
+    events = asyncio.run(collect())
+
+    assert events[-1] == {
+        "type": "raw",
+        "content": 'do(action="Launch", app="小红书")',
+    }
+
+
+def test_invalid_model_output_retries_instead_of_finishing(monkeypatch):
+    agent = _make_agent()
+    responses = iter(["", 'do(action="Launch", app="小红书")'])
+
+    async def fake_stream(_messages):
+        yield {"type": "raw", "content": next(responses)}
+
+    async def fake_execute(_action, _width, _height):
+        return ActionResult(success=True, should_finish=False, message=None)
+
+    monkeypatch.setattr(agent, "_stream_openai", fake_stream)
+    monkeypatch.setattr(agent.action_handler, "execute", fake_execute)
+
+    async def run():
+        agent._prepare_initial_context("task", "img0", "app")
+        first = [item async for item in agent._execute_step()]
+        second = [item async for item in agent._execute_step()]
+        return first, second
+
+    first, second = asyncio.run(run())
+
+    assert first[-1]["data"]["finished"] is False
+    assert first[-1]["data"]["action"] is None
+    assert second[-1]["data"]["action"]["action"] == "Launch"
+    assert second[-1]["data"]["finished"] is False
 
 
 # ---------------------------------------------------------------------------

@@ -258,7 +258,9 @@ def _model_config() -> ModelConfig:
         ).strip(),
         api_key=api_key,
         model_name=os.getenv("AUTOGLM_XHS_COMMENT_MODEL", "gpt-6.1-sol").strip(),
-        max_completion_tokens=3000,
+        max_completion_tokens=int(
+            os.getenv("AUTOGLM_XHS_COMMENT_MAX_COMPLETION_TOKENS", "8000")
+        ),
         include_sampling_parameters=False,
         lang="cn",
     )
@@ -356,20 +358,46 @@ async def _stream_agent(agent: Any, task: str) -> tuple[bool, str, int]:
     final_success = False
     final_message = "Task ended without a result"
     steps = 0
+    executed_actions = 0
     try:
         timeout = int(os.getenv("AUTOGLM_XHS_COMMENT_TIMEOUT_SECONDS", "900"))
         async with asyncio.timeout(timeout):
-            async for event in agent.stream(task):
-                data = event.get("data", {})
-                if event.get("type") == "step":
-                    steps = max(steps, int(data.get("step", 0)))
-                elif event.get("type") == "done":
-                    final_success = bool(data.get("success", False))
-                    final_message = str(data.get("message") or "")
-                    steps = max(steps, int(data.get("steps", steps)))
-                elif event.get("type") in {"error", "cancelled", "takeover"}:
-                    final_success = False
-                    final_message = str(data.get("message") or event.get("type"))
+            continue_with: str | None = None
+            for finish_attempt in range(3):
+                async for event in agent.stream(task, continue_with=continue_with):
+                    data = event.get("data", {})
+                    if event.get("type") == "step":
+                        steps = max(steps, int(data.get("step", 0)))
+                        action = data.get("action") or {}
+                        if action.get("_metadata") == "do" and data.get("success"):
+                            executed_actions += 1
+                    elif event.get("type") == "done":
+                        final_success = bool(data.get("success", False))
+                        final_message = str(data.get("message") or "")
+                        steps = max(steps, int(data.get("steps", steps)))
+                    elif event.get("type") in {"error", "cancelled", "takeover"}:
+                        final_success = False
+                        final_message = str(data.get("message") or event.get("type"))
+
+                tagged_result = bool(
+                    _TOAST_PATTERN.match(final_message.strip())
+                    or _ERROR_PATTERN.match(final_message.strip())
+                )
+                if not final_success or tagged_result or finish_attempt == 2:
+                    break
+                continue_with = (
+                    "你提前结束了任务，但没有返回 TOAST: 或 ERROR:，且当前已执行 "
+                    f"{executed_actions} 个设备操作。请继续查看实时截图并执行任务；"
+                    "只有看到真实 Toast 后才能返回 TOAST:，明确失败时返回 ERROR:。"
+                )
+            if final_success and not (
+                _TOAST_PATTERN.match(final_message.strip())
+                or _ERROR_PATTERN.match(final_message.strip())
+            ):
+                final_success = False
+                final_message = (
+                    "Model ended automation without TOAST: or ERROR: after 3 attempts"
+                )
         return final_success, final_message, steps
     except TimeoutError:
         await agent.cancel()

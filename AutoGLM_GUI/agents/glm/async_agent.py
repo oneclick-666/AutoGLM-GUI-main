@@ -62,6 +62,8 @@ class AsyncGLMAgent(AsyncAgentBase, AsyncAgent):
         self._pending_task: str | None = None
         self._pending_reference_images: list[dict[str, str]] = []
         self._persistent_reference_images: list[dict[str, str]] = []
+        self._action_format_retry: str | None = None
+        self._invalid_action_count = 0
 
     def set_persistent_reference_images(
         self, attachments: list[dict[str, str]]
@@ -72,6 +74,8 @@ class AsyncGLMAgent(AsyncAgentBase, AsyncAgent):
     def reset(self) -> None:
         super().reset()
         self._persistent_reference_images = []
+        self._action_format_retry = None
+        self._invalid_action_count = 0
 
     def _get_default_system_prompt(self, lang: str) -> str:
         return get_system_prompt(lang)
@@ -158,6 +162,9 @@ class AsyncGLMAgent(AsyncAgentBase, AsyncAgent):
                     {"mime_type": "image/png", "data": screenshot.base64_data},
                     *self._persistent_reference_images,
                 ]
+            if self._action_format_retry:
+                text_content += f"\n\n{self._action_format_retry}"
+                self._action_format_retry = None
             self._context.append(
                 MessageBuilder.create_user_message_with_images(
                     text=text_content,
@@ -262,8 +269,51 @@ class AsyncGLMAgent(AsyncAgentBase, AsyncAgent):
                 action = self.parser.parse(action_str)
             except ValueError as e:
                 if self.agent_config.verbose:
-                    logger.warning(f"Failed to parse action: {e}, treating as finish")
-                action = {"_metadata": "finish", "message": action_str}
+                    logger.warning(f"Failed to parse action: {e}, requesting retry")
+                self._invalid_action_count += 1
+                self._context[-1] = MessageBuilder.remove_images_from_message(
+                    self._context[-1]
+                )
+                self._context.append(
+                    MessageBuilder.create_assistant_message(
+                        raw_content or "(empty model response)"
+                    )
+                )
+                if self._invalid_action_count < 3:
+                    self._action_format_retry = (
+                        "上一轮没有返回可执行指令。请重新查看当前截图，并且只按系统"
+                        "规定返回一个 do(...) 或 finish(...) 指令；不要返回 JSON、"
+                        "Markdown 或空内容。"
+                    )
+                    yield {
+                        "type": "step",
+                        "data": {
+                            "step": self._step_count,
+                            "thinking": thinking,
+                            "action": None,
+                            "success": False,
+                            "finished": False,
+                            "message": "Model returned no executable action; retrying",
+                            "screenshot": screenshot.base64_data,
+                        },
+                    }
+                    return
+
+                yield {
+                    "type": "step",
+                    "data": {
+                        "step": self._step_count,
+                        "thinking": thinking,
+                        "action": None,
+                        "success": False,
+                        "finished": True,
+                        "message": "Model returned no executable action after 3 attempts",
+                        "screenshot": screenshot.base64_data,
+                    },
+                }
+                return
+
+        self._invalid_action_count = 0
 
         if self.agent_config.verbose:
             msgs = get_messages(self.agent_config.lang)
@@ -379,6 +429,8 @@ class AsyncGLMAgent(AsyncAgentBase, AsyncAgent):
         buffer = ""
         action_markers = ["finish(message=", "do(action="]
         in_action_phase = False
+        content_seen = False
+        reasoning_parts: list[str] = []
 
         try:
             async for chunk in stream:
@@ -389,8 +441,15 @@ class AsyncGLMAgent(AsyncAgentBase, AsyncAgent):
                 if len(chunk.choices) == 0:
                     continue
 
-                if chunk.choices[0].delta.content is not None:
-                    content = chunk.choices[0].delta.content
+                delta = chunk.choices[0].delta
+                reasoning_content = getattr(delta, "reasoning_content", None)
+                if reasoning_content:
+                    reasoning_parts.append(reasoning_content)
+                    yield {"type": "thinking", "content": reasoning_content}
+
+                if delta.content is not None:
+                    content = delta.content
+                    content_seen = content_seen or bool(content)
                     yield {"type": "raw", "content": content}
 
                     if in_action_phase:
@@ -422,6 +481,11 @@ class AsyncGLMAgent(AsyncAgentBase, AsyncAgent):
                     if not is_potential_marker and len(buffer) > 0:
                         yield {"type": "thinking", "content": buffer}
                         buffer = ""
+
+            # Some reasoning-model-compatible gateways return the complete
+            # answer in reasoning_content and leave content empty.
+            if not content_seen and reasoning_parts:
+                yield {"type": "raw", "content": "".join(reasoning_parts)}
 
         finally:
             await stream.close()
