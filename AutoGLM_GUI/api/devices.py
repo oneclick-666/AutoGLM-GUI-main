@@ -12,7 +12,6 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import httpx
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
@@ -212,41 +211,6 @@ def upload_file_to_device(
     file: UploadFile = File(...),
 ) -> dict[str, Any]:
     """Let the selected device download a temporary upload into its Download folder."""
-    from AutoGLM_GUI.mumu_registry import get_mumu_registration
-
-    mumu = get_mumu_registration(device_id)
-    if mumu:
-        try:
-            file.file.seek(0)
-            response = httpx.post(
-                f"{mumu.base_url}/api/v1/emulators/{mumu.index}/files",
-                files={
-                    "file": (
-                        file.filename or "upload.bin",
-                        file.file,
-                        file.content_type or "application/octet-stream",
-                    )
-                },
-                timeout=2100,
-            )
-            if response.is_error:
-                try:
-                    detail = response.json().get("detail")
-                except (ValueError, AttributeError):
-                    detail = None
-                raise RuntimeError(
-                    detail
-                    or f"pymumu file service returned HTTP {response.status_code}"
-                )
-            payload = response.json()
-            if not isinstance(payload, dict):
-                raise RuntimeError("pymumu returned an invalid upload response")
-            return payload
-        except Exception as error:
-            raise HTTPException(
-                status_code=502, detail=f"pymumu file upload failed: {error}"
-            ) from error
-
     base_url = os.getenv("AUTOGLM_DEVICE_DOWNLOAD_BASE_URL", "").strip().rstrip("/")
     if not base_url:
         raise HTTPException(
