@@ -54,6 +54,17 @@ class _FakeDevice:
         return "com.example.app"
 
 
+class _EmptyStream:
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        raise StopAsyncIteration
+
+    async def close(self) -> None:
+        pass
+
+
 def _make_agent() -> AsyncGLMAgent:
     return AsyncGLMAgent(
         model_config=ModelConfig(),
@@ -65,6 +76,40 @@ def _make_agent() -> AsyncGLMAgent:
 async def _drain(agen) -> None:
     async for _ in agen:
         pass
+
+
+def test_openai_request_uses_max_tokens_by_default(monkeypatch):
+    agent = _make_agent()
+    captured: dict[str, Any] = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _EmptyStream()
+
+    monkeypatch.setattr(agent.openai_client.chat.completions, "create", fake_create)
+    asyncio.run(_drain(agent._stream_openai([])))
+
+    assert captured["max_tokens"] == 3000
+    assert "max_completion_tokens" not in captured
+
+
+def test_openai_request_uses_max_completion_tokens_when_configured(monkeypatch):
+    agent = AsyncGLMAgent(
+        model_config=ModelConfig(max_tokens=111, max_completion_tokens=222),
+        agent_config=AgentConfig(max_steps=10, verbose=False),
+        device=_FakeDevice(),
+    )
+    captured: dict[str, Any] = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _EmptyStream()
+
+    monkeypatch.setattr(agent.openai_client.chat.completions, "create", fake_create)
+    asyncio.run(_drain(agent._stream_openai([])))
+
+    assert captured["max_completion_tokens"] == 222
+    assert "max_tokens" not in captured
 
 
 # ---------------------------------------------------------------------------

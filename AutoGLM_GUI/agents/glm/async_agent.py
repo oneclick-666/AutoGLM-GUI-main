@@ -355,16 +355,23 @@ class AsyncGLMAgent(AsyncAgentBase, AsyncAgent):
         self, messages: list[dict[str, Any]]
     ) -> AsyncGenerator[dict[str, str], None]:
         """流式调用 OpenAI，yield thinking chunks。"""
-        stream = await self.openai_client.chat.completions.create(
-            messages=messages,  # type: ignore[arg-type]
-            model=self.model_config.model_name,
-            max_tokens=self.model_config.max_tokens,
-            temperature=self.model_config.temperature,
-            top_p=self.model_config.top_p,
-            frequency_penalty=self.model_config.frequency_penalty,
-            extra_body=self.model_config.extra_body,
-            stream=True,
-        )
+        request_kwargs: dict[str, Any] = {
+            "messages": messages,
+            "model": self.model_config.model_name,
+            "temperature": self.model_config.temperature,
+            "top_p": self.model_config.top_p,
+            "frequency_penalty": self.model_config.frequency_penalty,
+            "extra_body": self.model_config.extra_body,
+            "stream": True,
+        }
+        if self.model_config.max_completion_tokens is not None:
+            request_kwargs["max_completion_tokens"] = (
+                self.model_config.max_completion_tokens
+            )
+        else:
+            request_kwargs["max_tokens"] = self.model_config.max_tokens
+
+        stream = await self.openai_client.chat.completions.create(**request_kwargs)
 
         buffer = ""
         action_markers = ["finish(message=", "do(action="]
