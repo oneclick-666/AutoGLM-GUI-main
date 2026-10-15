@@ -508,8 +508,12 @@ def connect_wifi_manual(
                     message=f"Failed to register pymumu control: {error}",
                     error="mumu_control_registration_failed",
                 )
-        # Refresh device list to show new device
-        device_manager.force_refresh()
+        # MuMu control is registered above and its scrcpy stream addresses the
+        # returned device ID directly. A full ADB refresh can probe every known
+        # device and add tens of seconds to lease acquisition; the background
+        # poller will refresh the UI cache without blocking this request.
+        if request.emulator_provider != "mumu":
+            device_manager.force_refresh()
 
         return WiFiManualConnectResponse(
             success=True,

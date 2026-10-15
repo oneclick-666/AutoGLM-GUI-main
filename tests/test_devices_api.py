@@ -362,6 +362,7 @@ def test_connect_mumu_registers_pymumu_control(devices_env: dict) -> None:
     assert registration is not None
     assert registration.index == 3
     assert registration.base_url == "http://windows-host:8765"
+    assert devices_env["device_manager"].force_refresh_calls == 0
 
 
 def test_pair_wifi_failure_maps_invalid_pairing_code(devices_env: dict) -> None:
