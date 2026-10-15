@@ -444,9 +444,11 @@ def disconnect_wifi(request: WiFiDisconnectRequest) -> WiFiDisconnectResponse:
     if success:
         from AutoGLM_GUI.mumu_registry import unregister_mumu_device
 
-        unregister_mumu_device(request.device_id)
-        # Refresh device list to update status
-        device_manager.force_refresh()
+        is_mumu = unregister_mumu_device(request.device_id)
+        # As with MuMu connect, the background poller updates the device cache.
+        # Stopping one emulator must not synchronously probe all other devices.
+        if not is_mumu:
+            device_manager.force_refresh()
 
     return WiFiDisconnectResponse(
         success=success,

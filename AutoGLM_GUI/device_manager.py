@@ -263,6 +263,7 @@ class DeviceManager:
         # Device state storage (indexed by serial now)
         self._devices: dict[DeviceSerial, ManagedDevice] = {}  # Key: serial
         self._devices_lock = threading.RLock()  # Reentrant for nested calls
+        self._poll_lock = threading.Lock()
 
         # Reverse mapping from connection endpoint to canonical serial.
         # Kept for backward compatibility with APIs that pass device_id.
@@ -453,16 +454,43 @@ class DeviceManager:
 
     def _poll_devices(self) -> None:
         """Poll ADB device list and update cache (serial-based aggregation)."""
+        # Disconnect requests and the background poller can arrive together.
+        # Reuse the in-flight refresh instead of multiplying ADB probes/threads.
+        if not self._poll_lock.acquire(blocking=False):
+            return
+        try:
+            self._poll_devices_once()
+        finally:
+            self._poll_lock.release()
+
+    def _poll_devices_once(self) -> None:
         from AutoGLM_GUI.adb_plus import get_device_serial
 
         # Step 1: Get ADB devices and fetch serials (in parallel)
         adb_devices = self._adb_conn.list_devices()
+        with self._devices_lock:
+            known_serials = dict(self._device_id_to_serial)
+            online_ids = {
+                conn.device_id
+                for managed in self._devices.values()
+                for conn in managed.connections
+                if conn.status == "device"
+            }
+
+        def resolve_serial(device: DeviceInfo) -> str:
+            cached = known_serials.get(device.device_id)
+            if cached and (device.status != "device" or device.device_id in online_ids):
+                return cached
+            if device.status != "device":
+                # Offline/unauthorized transports cannot answer shell getprop.
+                return device.device_id
+            return get_device_serial(device.device_id, self._adb_path)
 
         if adb_devices:
             with ThreadPoolExecutor(max_workers=min(len(adb_devices), 8)) as pool:
                 serials = list(
                     pool.map(
-                        lambda d: get_device_serial(d.device_id, self._adb_path),
+                        resolve_serial,
                         adb_devices,
                     )
                 )
@@ -595,7 +623,8 @@ class DeviceManager:
 
                 # Remove reverse mappings
                 for conn in managed.connections:
-                    self._device_id_to_serial.pop(conn.device_id, None)
+                    if self._device_id_to_serial.get(conn.device_id) == serial:
+                        self._device_id_to_serial.pop(conn.device_id, None)
 
         # Step 5: Discover mDNS devices (if enabled and supported)
         if self._enable_mdns_discovery and self._check_mdns_support():

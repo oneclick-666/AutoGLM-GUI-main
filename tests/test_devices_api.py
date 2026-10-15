@@ -281,8 +281,12 @@ def test_connect_wifi_failure_maps_not_found_error(devices_env: dict) -> None:
     assert body["error"] == "device_not_found"
 
 
-def test_disconnect_wifi_success_refreshes(devices_env: dict) -> None:
-    register_mumu_device("192.168.0.20:5555", 0, "http://windows-host:8765")
+@pytest.mark.parametrize("is_mumu", [False, True])
+def test_disconnect_wifi_success_refreshes_only_regular_devices(
+    devices_env: dict, is_mumu: bool
+) -> None:
+    if is_mumu:
+        register_mumu_device("192.168.0.20:5555", 0, "http://windows-host:8765")
     response = devices_env["client"].post(
         "/api/devices/disconnect_wifi",
         json={"device_id": "192.168.0.20:5555"},
@@ -297,7 +301,7 @@ def test_disconnect_wifi_success_refreshes(devices_env: dict) -> None:
     assert (
         devices_env["device_manager"].last_disconnect_wifi_device == "192.168.0.20:5555"
     )
-    assert devices_env["device_manager"].force_refresh_calls == 1
+    assert devices_env["device_manager"].force_refresh_calls == (0 if is_mumu else 1)
     assert get_mumu_registration("192.168.0.20:5555") is None
 
 
